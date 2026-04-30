@@ -109,6 +109,10 @@ interface State {
     mrRegistrationVersion: number;
     mrRegistrationInProgress: boolean;
     mrRegistrationProgress: { level: number; nLevels: number; iter: number; mi: number } | null;
+
+    // 選択中の tracer preset id (null = 未選択 = 自動判定 or デフォルト).
+    // 個別 PT volume でなく "現在のセッション" 単位で保持する。
+    activeTracerId: string | null;
 }
 
 export const useSegmentationStore = defineStore('segmentation', {
@@ -162,6 +166,8 @@ export const useSegmentationStore = defineStore('segmentation', {
         mrRegistrationVersion: 0,
         mrRegistrationInProgress: false,
         mrRegistrationProgress: null,
+
+        activeTracerId: null,
     }),
 
     getters: {
@@ -378,6 +384,41 @@ export const useSegmentationStore = defineStore('segmentation', {
             }
             this.maskVersion++;
             return n;
+        },
+
+        // ===== Tracer preset =====
+        // SUV threshold + label preset を一括差し替え。
+        // 注意: PET window WC/WW と CLUT は ImageBox 単位なので DicomView 側で適用する。
+        // ここでは store が責任を持つ部分 (threshold + labels + activeTracerId) のみ更新。
+        applyTracerLabelsAndThreshold(tracerId: string, threshold: number, labels: Array<{ name: string }>) {
+            this.activeTracerId = tracerId;
+            this.threshold = threshold;
+            this.thresholdUnit = 'SUV';
+            // Existing mask voxels の id がそのまま無効化されないよう、
+            // labels 数が以前と同じなら既存 id を維持して name のみ書き換える方が安全。
+            const oldLen = this.labels.length;
+            const newLen = labels.length;
+            const palette = DEFAULT_LABEL_PALETTE;
+            if (oldLen === newLen) {
+                for (let i = 0; i < newLen; i++) {
+                    this.labels[i].name = labels[i].name;
+                    this.labels[i].color = palette[i % palette.length];
+                }
+            } else {
+                // 数が違う → 新しい id を割り振り直す。Mask は invalidate.
+                this.labels = labels.map((l, i) => ({
+                    id: i + 1,
+                    name: l.name,
+                    color: palette[i % palette.length],
+                }));
+                this.currentLabelId = 1;
+                if (this.thresholdMask) this.thresholdMask.fill(0);
+                if (this.manualEdits) this.manualEdits.fill(0);
+                if (this.finalMask) this.finalMask.fill(0);
+                this.undoStack = [];
+                this.invalidateComponentMap();
+                this.maskVersion++;
+            }
         },
 
         // ===== 自動保存 (IndexedDB persistence) 用シリアライズ =====

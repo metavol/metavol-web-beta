@@ -48,6 +48,7 @@ import * as nifti from 'nifti-reader-js';
 import * as Phantom from './phantom.ts';
 import { useSegmentationStore } from '../stores/segmentation';
 import { sphereStatsInPet, fillPolygonOnSlice, findMaximumAxis as maxAxis } from './segmentation/maskOps';
+import { TRACER_PRESETS, tracerById, detectTracer, type TracerPreset } from './tracerPresets';
 import SegmentationPanel from './SegmentationPanel.vue';
 import DebugInspector from './DebugInspector.vue';
 import { computed, onMounted, nextTick, provide } from 'vue';
@@ -241,6 +242,21 @@ const lastCheckedRecoveryUid = ref<string | null>(null);
 watch(() => segStore.petVolumeRef?.metadata?.seriesUID ?? null, async (uid) => {
   if (!uid || uid === lastCheckedRecoveryUid.value) return;
   lastCheckedRecoveryUid.value = uid;
+
+  // Auto-detect tracer from SeriesDescription / StudyDescription.
+  // user が tracer を明示選択していない (activeTracerId null) ときだけ走る。
+  // Recovery dialog で user が Recover を選ぶと labels/threshold は上書きされるので、
+  // ここでの先行適用は副作用にならない。
+  if (segStore.activeTracerId == null) {
+    const md = segStore.petVolumeRef?.metadata;
+    const sd = md?.seriesDescription;
+    const detected = detectTracer(sd);
+    if (detected) {
+      console.log(`[tracer] auto-detected "${detected.name}" from "${sd}"`);
+      applyTracerPreset(detected);
+    }
+  }
+
   try {
     const session = await loadSession(uid);
     if (!session) return;
@@ -813,6 +829,117 @@ const presetSelected = (e: string) => {
   if (e === "SUV-0-15") setMyWCWW(id, 7.5, 15);
   if (e === "Reset") setMyWCWW(id, null, null);
   show();
+};
+
+// Tracer preset 適用: PT 表示窓 / CLUT を全 PT/Fusion box に書き換え + segStore の
+// threshold + label preset を更新。Mask 数や label 数が変わると mask 全消去 (store 側で実施)。
+//
+// 注意: ImageBoxInfo は volume 直接ではなく `currentSeriesNumber` で seriesList を参照する設計。
+// Volume が PT かどうかは seriesList[currentSeriesNumber].volume.metadata.modality で判定する。
+const applyTracerPreset = (preset: TracerPreset) => {
+  segStore.applyTracerLabelsAndThreshold(preset.id, preset.suvThreshold, preset.labels);
+
+  const isPtSeries = (idx: number | undefined): boolean => {
+    if (idx == null || idx < 0 || idx >= seriesList.length) return false;
+    const v = seriesList[idx].volume;
+    if (v?.metadata?.modality === 'PT') return true;
+    // volume 未生成でも DICOM タグだけは確認できる
+    const dlist = seriesList[idx].myDicom;
+    const m = dlist?.[0]?.string("x00080060")?.toUpperCase();
+    return m === 'PT' || m === 'PET';
+  };
+
+  for (let i = 0; i < imageBoxInfos.value.length; i++) {
+    if (!isAnyVolumeBox(i)) continue;
+    const info = imageBoxInfos.value[i];
+    if (isFusedImageBoxInfo(i)) {
+      // Fusion: PT layer は currentSeriesNumber1 のレイヤ。固定で myWC1/myWW1/clut1 を更新。
+      const fi = info as FusedVolumeImageBoxInfo;
+      fi.myWC1 = preset.suvWindow.wc;
+      fi.myWW1 = preset.suvWindow.ww;
+      fi.clut1 = preset.petClut;
+    } else if (isVolumeImageBoxInfo(i)) {
+      // Volume: そのボックスが参照する series が PT のときだけ更新 (CT/MR は触らない)
+      const v = info as VolumeImageBoxInfo;
+      if (isPtSeries(v.currentSeriesNumber)) {
+        v.myWC = preset.suvWindow.wc;
+        v.myWW = preset.suvWindow.ww;
+        v.clut = preset.petClut;
+      }
+    }
+  }
+  show();
+};
+
+// applyTracerById は App.vue から呼び出される入口 (defineExpose 経由)。
+const applyTracerById = (id: string) => {
+  const p = tracerById(id);
+  if (p) applyTracerPreset(p);
+};
+
+// DICOM tag viewer 用: 現在選択中の Box が指す series の **現スライス** を返す。
+//   - DICOM 2D box: currentSliceNumber 直接
+//   - Volume / Fusion box: centerInWorld を voxel に逆変換 → 最寄り slice index
+//   - MIP / 不明: スライス 0
+// reactive にしたいので computed として exposed する (function 形式は legacy として残す)。
+interface TagContext {
+    dataset: DataSet;
+    label: string;
+    sliceIndex: number;
+    sliceCount: number;
+}
+
+const computeTagContext = (): TagContext | null => {
+  const id = selectedImageBoxId.value;
+  if (id < 0 || id >= imageBoxInfos.value.length) return null;
+  const info = imageBoxInfos.value[id] as any;
+  const idx: number | undefined = info?.currentSeriesNumber;
+  if (idx == null || idx < 0 || idx >= seriesList.length) return null;
+  const series = seriesList[idx];
+  if (!series?.myDicom?.length) return null;
+  const dlist = series.myDicom;
+
+  // どのスライスを示すかを box タイプ別に決定
+  let sliceIdx = 0;
+  if ('currentSliceNumber' in info && typeof info.currentSliceNumber === 'number') {
+    // DICOM 2D box
+    sliceIdx = info.currentSliceNumber;
+  } else if ('centerInWorld' in info && info.centerInWorld) {
+    // Volume / Fusion: world → voxel.z を slice index として採用
+    const v = series.volume;
+    if (v) {
+      try {
+        const vc = worldToVoxel(info.centerInWorld, v);
+        sliceIdx = Math.round(vc.z);
+      } catch {}
+    }
+  }
+  if (sliceIdx < 0) sliceIdx = 0;
+  if (sliceIdx >= dlist.length) sliceIdx = dlist.length - 1;
+
+  const ds = dlist[sliceIdx];
+  const desc = ds.string("x0008103e") ?? ds.string("x00081030") ?? '(no description)';
+  return { dataset: ds, label: desc, sliceIndex: sliceIdx, sliceCount: dlist.length };
+};
+
+// reactive ref として外部に渡す (paging 時に dialog が自動更新)。
+// imageBoxInfos.value の中の centerInWorld / currentSliceNumber が変わると再評価される。
+const activeTagContext = computed<TagContext | null>(() => {
+  // imageBoxInfos / selectedImageBoxId への依存を Vue に伝えるため明示参照
+  void imageBoxInfos.value;
+  void selectedImageBoxId.value;
+  return computeTagContext();
+});
+
+// Function 形式 (open 時の一回限りの取得) — backward compat
+const getActiveTagContext = (): TagContext | null => computeTagContext();
+const getTagContextForSeries = (idx: number): TagContext | null => {
+  if (idx < 0 || idx >= seriesList.length) return null;
+  const series = seriesList[idx];
+  if (!series?.myDicom?.length) return null;
+  const ds = series.myDicom[0];
+  const desc = ds.string("x0008103e") ?? ds.string("x00081030") ?? '(no description)';
+  return { dataset: ds, label: desc, sliceIndex: 0, sliceCount: series.myDicom.length };
 };
 
 const dragEnter = () => { isEnter.value = true; }
@@ -2849,6 +2976,13 @@ defineExpose({
   jpegDecompressInProgress,
   jpegDecompressDone,
   jpegDecompressTotal,
+  // Tracer preset
+  applyTracerPreset,
+  applyTracerById,
+  // DICOM tag viewer
+  getActiveTagContext,
+  getTagContextForSeries,
+  activeTagContext,
 });
 
 </script>

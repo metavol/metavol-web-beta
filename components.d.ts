@@ -8,6 +8,7 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     DebugInspector: typeof import('./src/components/DebugInspector.vue')['default']
+    DicomTagDialog: typeof import('./src/components/DicomTagDialog.vue')['default']
     DicomView: typeof import('./src/components/DicomView.vue')['default']
     HelloWorld: typeof import('./src/components/HelloWorld.vue')['default']
     ImageBox: typeof import('./src/components/ImageBox.vue')['default']

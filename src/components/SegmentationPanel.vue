@@ -5,6 +5,7 @@ import { useSegmentationStore } from '../stores/segmentation';
 import { readNiftiMask } from './segmentation/niftiReader';
 import { summarizeLesions, type LesionStat } from './segmentation/maskOps';
 import { triggerDownload } from './segmentation/niftiWriter';
+import { getSuvSanityWarnings, getSuvMetadataSummary } from './suvSanity';
 import { applyRigidToVolume, type RegistrationSnapshot } from './registration/transform';
 import { registerMrToPt } from './registration/registerMrPt';
 
@@ -43,16 +44,23 @@ const THRESHOLD_PRESETS = [
     { title: 'Manual', value: 'manual' },
 ];
 
-const thresholdSelection = ref<string>(
-    ['2.5', '3.0', '3.5', '4.0'].includes(String(store.threshold))
-        ? String(store.threshold)
-        : 'manual'
-);
+// store.threshold に追従する combobox 表示。tracer preset 等で外部から変えられても UI が同期する。
+// String(3.0) === "3" なので 1 桁固定の比較で行う。
+const thresholdSelection = computed<string>({
+    get: () => {
+        const v = store.threshold;
+        if (!Number.isFinite(v)) return 'manual';
+        const s = v.toFixed(1);
+        return ['2.5', '3.0', '3.5', '4.0'].includes(s) ? s : 'manual';
+    },
+    set: () => { /* setter は onThresholdSelectionChange 側で行う */ },
+});
 
 const onThresholdSelectionChange = (val: string) => {
-    thresholdSelection.value = val;
     if (val !== 'manual') {
         store.threshold = Number(val);
+    } else {
+        // Manual を選んだだけでは数値は変えない (text-field で個別入力)
     }
 };
 
@@ -444,6 +452,24 @@ const suvOkLabel = computed<string | null>(() => {
     }
 });
 
+// SUV メタデータの妥当性警告 (重み・線量・撮像時間など)
+const suvSanityWarnings = computed(() => getSuvSanityWarnings(store.petVolumeRef));
+const suvSanityHasError = computed(() => suvSanityWarnings.value.some(w => w.severity === 'error'));
+const suvSanityHasWarn = computed(() => suvSanityWarnings.value.some(w => w.severity === 'warn'));
+
+// "Details" 展開トグル (主要メタ値の表示)
+const showSuvDetails = ref(false);
+const suvMetaSummary = computed(() => getSuvMetadataSummary(store.petVolumeRef));
+const fmtN = (v: number | null, dp: number = 1, suffix = ''): string => {
+    if (v == null || !Number.isFinite(v)) return '—';
+    return v.toFixed(dp) + suffix;
+};
+const fmtIso = (s: string | null): string => {
+    if (!s) return '—';
+    // YYYY-MM-DDTHH:MM:SS.sssZ → YYYY-MM-DD HH:MM:SS
+    return s.replace('T', ' ').replace(/\.\d+Z?$/, '');
+};
+
 const polygonModeProxy = computed({
     get: () => store.polygon?.mode ?? store.defaultPolygonMode,
     set: (m: 'add' | 'erase') => {
@@ -482,6 +508,85 @@ const polygonModeProxy = computed({
             <div v-else-if="suvOkLabel" class="mv-suv-ok" :title="`source: ${store.petVolumeRef?.metadata?.suvSource}`">
                 <v-icon icon="mdi-check-circle-outline" size="x-small" class="mr-1" />
                 {{ suvOkLabel }}
+            </div>
+
+            <!-- SUV metadata sanity warnings -->
+            <div
+                v-if="suvSanityWarnings.length > 0"
+                :class="[
+                    'mv-suv-sanity',
+                    suvSanityHasError ? 'is-error' : (suvSanityHasWarn ? 'is-warn' : 'is-info'),
+                ]"
+            >
+                <div class="mv-suv-sanity-head" @click="showSuvDetails = !showSuvDetails">
+                    <v-icon
+                        :icon="suvSanityHasError ? 'mdi-alert-circle' : (suvSanityHasWarn ? 'mdi-alert' : 'mdi-information-outline')"
+                        size="x-small"
+                        class="mr-1"
+                    />
+                    <span class="mv-suv-sanity-title">
+                        {{ suvSanityHasError
+                            ? `${suvSanityWarnings.filter(w => w.severity === 'error').length} error(s)`
+                            : suvSanityHasWarn
+                                ? `${suvSanityWarnings.filter(w => w.severity === 'warn').length} warning(s)`
+                                : `${suvSanityWarnings.length} note(s)` }}
+                        in PET metadata
+                    </span>
+                    <v-icon
+                        :icon="showSuvDetails ? 'mdi-chevron-up' : 'mdi-chevron-down'"
+                        size="x-small"
+                    />
+                </div>
+                <ul v-if="showSuvDetails" class="mv-suv-sanity-list">
+                    <li
+                        v-for="(w, i) in suvSanityWarnings"
+                        :key="i"
+                        :class="['mv-suv-sanity-item', `is-${w.severity}`]"
+                    >
+                        <span class="mv-suv-sanity-field">{{ w.field }}</span>
+                        <span class="mv-suv-sanity-msg">{{ w.message }}</span>
+                    </li>
+                </ul>
+            </div>
+
+            <!-- SUV metadata details (always available, expanded with sanity panel) -->
+            <div v-if="store.petVolumeRef?.metadata?.modality === 'PT' && showSuvDetails" class="mv-suv-details">
+                <div class="mv-suv-details-row">
+                    <span>BW</span>
+                    <span class="mv-mono">{{ fmtN(suvMetaSummary.patientWeightKg, 1, ' kg') }}</span>
+                </div>
+                <div class="mv-suv-details-row">
+                    <span>Dose</span>
+                    <span class="mv-mono">{{ fmtN(suvMetaSummary.doseMBq, 0, ' MBq') }}</span>
+                </div>
+                <div class="mv-suv-details-row">
+                    <span>Half-life</span>
+                    <span class="mv-mono">{{ fmtN(suvMetaSummary.halfLifeMin, 1, ' min') }}</span>
+                </div>
+                <div class="mv-suv-details-row">
+                    <span>Uptake</span>
+                    <span class="mv-mono">{{ fmtN(suvMetaSummary.uptakeMin, 0, ' min') }}</span>
+                </div>
+                <div class="mv-suv-details-row">
+                    <span>Inj. time</span>
+                    <span class="mv-mono">{{ fmtIso(suvMetaSummary.injectionDateTime) }}</span>
+                </div>
+                <div class="mv-suv-details-row">
+                    <span>Acq. time</span>
+                    <span class="mv-mono">{{ fmtIso(suvMetaSummary.acquisitionDateTime) }}</span>
+                </div>
+                <div class="mv-suv-details-row">
+                    <span>Decay corr.</span>
+                    <span class="mv-mono">{{ suvMetaSummary.decayCorrection ?? '—' }}</span>
+                </div>
+                <div class="mv-suv-details-row">
+                    <span>Units</span>
+                    <span class="mv-mono">{{ suvMetaSummary.units ?? '—' }}</span>
+                </div>
+                <div class="mv-suv-details-row">
+                    <span>SUV factor</span>
+                    <span class="mv-mono">{{ fmtN(suvMetaSummary.suvFactor, 6) }}</span>
+                </div>
             </div>
 
             <!-- Auto-save status -->
@@ -980,6 +1085,74 @@ const polygonModeProxy = computed({
     font-size: 11px;
     color: var(--mv-text-muted);
     border-bottom: 1px solid var(--mv-border);
+}
+
+/* Sanity warnings (collapsible) */
+.mv-suv-sanity {
+    border-bottom: 1px solid var(--mv-border);
+    font-size: 11px;
+}
+.mv-suv-sanity.is-error { background: rgba(255, 92, 122, 0.10); }
+.mv-suv-sanity.is-warn  { background: rgba(255, 175, 60, 0.10); }
+.mv-suv-sanity.is-info  { background: rgba(95, 158, 235, 0.08); }
+
+.mv-suv-sanity-head {
+    display: flex;
+    align-items: center;
+    padding: 6px 12px;
+    cursor: pointer;
+    user-select: none;
+}
+.mv-suv-sanity.is-error .mv-suv-sanity-head { color: var(--mv-error, #FF5C7A); }
+.mv-suv-sanity.is-warn  .mv-suv-sanity-head { color: var(--mv-warning, #FFB454); }
+.mv-suv-sanity.is-info  .mv-suv-sanity-head { color: var(--mv-text-dim); }
+.mv-suv-sanity-head:hover { filter: brightness(1.15); }
+.mv-suv-sanity-title {
+    flex: 1;
+    font-weight: 500;
+}
+.mv-suv-sanity-list {
+    list-style: none;
+    padding: 0 12px 8px 28px;
+    margin: 0;
+}
+.mv-suv-sanity-item {
+    display: flex;
+    gap: 6px;
+    padding: 3px 0;
+    line-height: 1.4;
+}
+.mv-suv-sanity-item.is-error { color: var(--mv-error, #FF5C7A); }
+.mv-suv-sanity-item.is-warn  { color: var(--mv-warning, #FFB454); }
+.mv-suv-sanity-item.is-info  { color: var(--mv-text-dim); }
+.mv-suv-sanity-field {
+    font-family: 'JetBrains Mono', 'Consolas', monospace;
+    font-size: 10px;
+    flex-shrink: 0;
+    opacity: 0.85;
+    min-width: 78px;
+}
+.mv-suv-sanity-msg {
+    flex: 1;
+    color: var(--mv-text);
+}
+
+/* SUV metadata details panel */
+.mv-suv-details {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--mv-border);
+    font-size: 11px;
+    color: var(--mv-text-dim);
+    background: var(--mv-surface-2);
+}
+.mv-suv-details-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 1px 0;
+}
+.mv-suv-details-row .mv-mono {
+    color: var(--mv-text);
+    font-size: 10px;
 }
 
 /* Auto-save status row (just under Linked PT) */

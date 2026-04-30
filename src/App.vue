@@ -106,6 +106,41 @@
         </v-list>
       </v-menu>
 
+      <v-menu>
+        <template v-slot:activator="{ props: act }">
+          <v-btn
+            v-bind="act"
+            :class="['mv-tool-btn', 'mv-tool-btn--wide', 'mr-1', { 'is-active': !!activeTracer }]"
+            variant="text"
+            size="small"
+          >
+            <v-icon icon="mdi-flask-outline" />
+            <span class="mv-tool-label">{{ activeTracer ? activeTracer.name : 'Tracer' }}</span>
+            <v-tooltip activator="parent" location="bottom">
+              {{ activeTracer
+                ? `Active: ${activeTracer.name} — click to switch`
+                : 'Pick a tracer preset (SUV threshold + window + labels)' }}
+            </v-tooltip>
+          </v-btn>
+        </template>
+        <v-list density="compact">
+          <v-list-item
+            v-for="t in tracerPresets"
+            :key="t.id"
+            :active="segStore.activeTracerId === t.id"
+            @click="onTracerSelected(t.id)"
+          >
+            <template v-slot:prepend>
+              <v-icon icon="mdi-radioactive" size="small" />
+            </template>
+            <v-list-item-title>{{ t.name }}</v-list-item-title>
+            <v-list-item-subtitle class="mv-tracer-sub">
+              SUV {{ t.suvThreshold }} · 0–{{ (t.suvWindow.wc + t.suvWindow.ww / 2).toFixed(0) }} · {{ t.labels.length }} labels
+            </v-list-item-subtitle>
+          </v-list-item>
+        </v-list>
+      </v-menu>
+
       <v-btn
         class="mv-tool-btn mv-tool-btn--wide mr-2"
         variant="text"
@@ -190,6 +225,16 @@
         class="mv-tool-btn"
         variant="text"
         size="small"
+        @click="onShowTags"
+      >
+        <v-icon icon="mdi-tag-text-outline" />
+        <v-tooltip activator="parent" location="bottom">DICOM tags (selected box)</v-tooltip>
+      </v-btn>
+
+      <v-btn
+        class="mv-tool-btn"
+        variant="text"
+        size="small"
         @click="drawerRight = !drawerRight"
       >
         <v-icon icon="mdi-format-vertical-align-top" style="transform: rotate(90deg)" />
@@ -222,6 +267,14 @@
         v-model:debugMode="voxelInspector"
       />
     </v-main>
+
+    <DicomTagDialog
+      v-model="tagDialogOpen"
+      :dataset="tagContext?.dataset ?? null"
+      :series-label="tagContext?.label ?? ''"
+      :slice-index="tagContext?.sliceIndex"
+      :slice-count="tagContext?.sliceCount"
+    />
   </v-app>
 </template>
 
@@ -231,6 +284,8 @@ import DicomView from "./components/DicomView.vue";
 import { getWH, getTileN } from "./components/UrlParser.ts";
 import { useSegmentationStore } from "./stores/segmentation";
 import { ensureWasmCodecsReady } from "./components/wasmCodec";
+import { TRACER_PRESETS, tracerById } from "./components/tracerPresets";
+import DicomTagDialog from "./components/DicomTagDialog.vue";
 
 // アプリ起動時に dcmjs-codecs WASM をプリウォーム (DICOM JPEG Lossless 用)。
 // ~4 MB の WASM を fetch + instantiate するので体感 0.3-1s かかる。
@@ -320,6 +375,31 @@ const runLayout = (kind: 'triplanarPt' | 'triplanarFused' | 'ptOnly4up' | 'compa
   if (kind === 'compare2up')    r.setupCompare2up?.();
 };
 
+// Tracer preset を pull-down で適用
+const tracerPresets = TRACER_PRESETS;
+const activeTracer = computed(() => {
+  const id = segStore.activeTracerId;
+  return id ? tracerById(id) : null;
+});
+const onTracerSelected = (id: string) => {
+  dicomViewRef.value?.applyTracerById?.(id);
+};
+
+// DICOM tag viewer (non-modal). 開いている間 paging に追従して中身が更新される。
+// dicomViewRef が expose する activeTagContext (computed ref) を直接読む。
+const tagDialogOpen = ref(false);
+const tagContext = computed(() => {
+  if (!tagDialogOpen.value) return null;
+  // Vue の defineExpose で expose された computed は ref として渡される。.value で unwrap。
+  const ctxRef: any = dicomViewRef.value?.activeTagContext;
+  if (ctxRef == null) return null;
+  // dicomViewRef.value は ComponentPublicInstance 越しなので、computed は自動 unwrap される。
+  return ctxRef as { dataset: any; label: string; sliceIndex: number; sliceCount: number } | null;
+});
+const onShowTags = () => {
+  tagDialogOpen.value = true;
+};
+
 // ★2: JPEG Lossless decompress 進捗を app-bar に表示
 const jpegProgress = computed(() => {
   const r = dicomViewRef.value;
@@ -370,6 +450,12 @@ const jpegProgress = computed(() => {
   font-size: 12px;
   font-weight: 600;
   color: var(--mv-text);
+}
+
+.mv-tracer-sub {
+  font-size: 10px !important;
+  color: var(--mv-text-muted) !important;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
 }
 
 :deep(.v-app-bar) {
