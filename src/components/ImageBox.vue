@@ -16,6 +16,15 @@ interface ClutLegendProp {
   maxLabel: string;
 }
 
+// 4 隅オーバーレイ。各隅は複数行を string[] で受け取り、改行表示。
+// undefined または全コーナー空配列なら何も描かない。
+export interface CornerInfoProp {
+  tl?: string[];
+  tr?: string[];
+  bl?: string[];
+  br?: string[];
+}
+
 const prop = defineProps<{
   width: number;
   height: number;
@@ -35,6 +44,11 @@ const prop = defineProps<{
   // Crosshair (canvas 上の screen 座標 px)。null/undefined なら描画しない。
   crosshairX?: number | null;
   crosshairY?: number | null;
+  // 4 隅 patient/exam info overlay。undefined ならグローバルトグル OFF。
+  cornerInfo?: CornerInfoProp;
+  // 断面支持線 (cross-reference lines)。他 box の slice plane を投影した線分。
+  // canvas pixel 座標。undefined / 空配列なら描画しない。
+  crossRefLines?: Array<{ x1: number; y1: number; x2: number; y2: number }>;
 }>();
 
 const emit = defineEmits<{
@@ -46,7 +60,14 @@ const emit = defineEmits<{
   (e: 'maximize'): void;
   (e: 'toggleOverlay'): void;
   (e: 'makeMpr'): void;
+  // Modality chip drag start: 親 (DicomView) が dataTransfer を埋めて fusion 起点にする
+  (e: 'modalityDragStart', ev: DragEvent): void;
 }>();
+
+// Modality chip drag は volume / fusion box でのみ有効 (DICOM 2D / MIP 用ではない)
+const isModalityChipDraggable = (): boolean => {
+  return prop.boxKind === 'volume' || prop.boxKind === 'fusion';
+};
 
 const isEnter = ref(false);
 
@@ -171,38 +192,52 @@ const showRgb = (ppp: Uint8Array, cols: number, rows: number, centerX:number, ce
     drawImageCvRgb(ppp, cols, rows, centerX, centerY, zoom);
 }
 
+// Bilinear sampling 版。zoom in 時のジャギー (nearest) を解消するため
+// fractional pixel 座標で 4 近傍を線形補間する。範囲外は黒背景。
+// 端 (fx >= nx-1 等) は x1 = clamp(x0+1, ≤nx-1) で stretched 1px に丸める。
 const drawImageCvZoom = async function(pix: Float32Array | Int16Array, ny:number, nx:number, wc:number, ww:number, intercept:number, slope:number, shiftX:number, shiftY:number, zoom:number) {
   if (cv1.value === null || ctx === null) return;
   const canvasx = cv1.value.width;
   const canvasy = cv1.value.height;
-  const myImageData = ctx.getImageData(0,0,canvasx,canvasy); // メモリーを新たに確保しないので、createImageDataよりも有利だと思う（想像）
+  const myImageData = ctx.getImageData(0,0,canvasx,canvasy);
   let ad = 0;
 
+  const lo = wc - ww/2;
+  const scale = 255 / ww;
+
   for (let y = 0; y<canvasy; y++){
+    const fy = (y-canvasy/2)/zoom + ny/2 + shiftY;
     for (let x = 0; x<canvasx; x++){
-      const x1 = Math.floor((x-canvasx/2)/zoom +nx/2 + shiftX);
-      const y1 = Math.floor((y-canvasy/2)/zoom +ny/2 + shiftY);
-      if (x1<0 || x1>nx || y1<0 || y1>ny){
-        myImageData.data[ad] = 0; //red
-        myImageData.data[ad+1] = 0; //green
-        myImageData.data[ad+2] = 0; //blue
+      const fx = (x-canvasx/2)/zoom + nx/2 + shiftX;
+      if (fx<0 || fx>=nx || fy<0 || fy>=ny){
+        myImageData.data[ad] = 0;
+        myImageData.data[ad+1] = 0;
+        myImageData.data[ad+2] = 0;
         ad += 4;
         continue;
       }
-      const raw = pix[x1+y1*nx] * slope + intercept;
-      let p = (raw-(wc-ww/2)) * (255/ww);
+      const x0 = Math.floor(fx);
+      const y0 = Math.floor(fy);
+      const x1 = x0 + 1 < nx ? x0 + 1 : x0;
+      const y1 = y0 + 1 < ny ? y0 + 1 : y0;
+      const dx = fx - x0;
+      const dy = fy - y0;
+      const v00 = pix[x0 + y0*nx];
+      const v10 = pix[x1 + y0*nx];
+      const v01 = pix[x0 + y1*nx];
+      const v11 = pix[x1 + y1*nx];
+      const v = (v00*(1-dx) + v10*dx) * (1-dy) + (v01*(1-dx) + v11*dx) * dy;
+      const raw = v * slope + intercept;
+      let p = (raw - lo) * scale;
       if (p<0) p=0;
       if (p>255) p=255;
-      myImageData.data[ad] = p; //red
-      myImageData.data[ad+1] = p; //green
-      myImageData.data[ad+2] = p; //blue
+      myImageData.data[ad] = p;
+      myImageData.data[ad+1] = p;
+      myImageData.data[ad+2] = p;
       ad += 4;
     }
   }
   ctx.putImageData(myImageData, 0,0,0,0,canvasx, canvasy);
-  // canvas-baked label / status は title bar に移行済みのため非表示
-  void wc; void ww;
-
 }
 
 const drawImageCvDirect = async function(pix: Float32Array | Int16Array, wc:number, ww:number) {
@@ -847,7 +882,12 @@ defineExpose({init, show, show2, showRgb, showDirect,
              @click.stop
              @dblclick="emit('maximize')">
             <span class="mv-mod-chip"
-                  :style="{ background: modalityChipColor(prop.modalityLabel) }">
+                  :class="{ 'mv-mod-chip--draggable': isModalityChipDraggable() }"
+                  :draggable="isModalityChipDraggable()"
+                  :title="isModalityChipDraggable() ? 'Drag onto another box to fuse' : ''"
+                  :style="{ background: modalityChipColor(prop.modalityLabel) }"
+                  @dragstart="(e: DragEvent) => emit('modalityDragStart', e)"
+                  @click.stop>
                 {{ (prop.modalityLabel || '??').toUpperCase() }}
             </span>
             <span class="mv-desc" :title="prop.description ?? ''">
@@ -961,6 +1001,20 @@ defineExpose({init, show, show2, showRgb, showDirect,
                         stroke="#00D4AA" stroke-width="1" fill="rgba(0,0,0,0.4)" />
             </svg>
 
+            <!-- Cross-reference lines (他 box の slice plane を投影した線) -->
+            <svg
+                v-if="prop.crossRefLines && prop.crossRefLines.length"
+                class="mv-cross-ref"
+                :viewBox="`0 0 ${prop.width} ${prop.height}`"
+                :width="prop.width"
+                :height="prop.height"
+                preserveAspectRatio="none"
+            >
+                <line v-for="(ln, idx) in prop.crossRefLines" :key="'cr'+idx"
+                      :x1="ln.x1" :y1="ln.y1" :x2="ln.x2" :y2="ln.y2"
+                      stroke="#FFD24A" stroke-width="0.7" stroke-dasharray="6 4" opacity="0.7" />
+            </svg>
+
             <!-- Color scale legend (Volume / Fusion / MIP のみ) -->
             <div v-if="prop.legend" class="mv-clut-legend">
                 <span class="mv-clut-min">{{ prop.legend.minLabel }}</span>
@@ -971,6 +1025,27 @@ defineExpose({init, show, show2, showRgb, showDirect,
                 <span class="mv-clut-min">{{ prop.legend2.minLabel }}</span>
                 <div class="mv-clut-bar" :style="{ background: prop.legend2.gradient }"></div>
                 <span class="mv-clut-max">{{ prop.legend2.maxLabel }}</span>
+            </div>
+
+            <!-- 4 隅オーバーレイ (patient / exam info) -->
+            <div v-if="prop.cornerInfo" class="mv-corner-overlay">
+                <div v-if="prop.cornerInfo.tl && prop.cornerInfo.tl.length"
+                     class="mv-corner mv-corner-tl">
+                    <div v-for="(s, k) in prop.cornerInfo.tl" :key="'tl'+k">{{ s }}</div>
+                </div>
+                <div v-if="prop.cornerInfo.tr && prop.cornerInfo.tr.length"
+                     class="mv-corner mv-corner-tr">
+                    <div v-for="(s, k) in prop.cornerInfo.tr" :key="'tr'+k">{{ s }}</div>
+                </div>
+                <div v-if="prop.cornerInfo.bl && prop.cornerInfo.bl.length"
+                     class="mv-corner mv-corner-bl">
+                    <div v-for="(s, k) in prop.cornerInfo.bl" :key="'bl'+k">{{ s }}</div>
+                </div>
+                <div v-if="prop.cornerInfo.br && prop.cornerInfo.br.length"
+                     class="mv-corner mv-corner-br"
+                     :class="{ 'mv-corner-br--lifted': prop.legend }">
+                    <div v-for="(s, k) in prop.cornerInfo.br" :key="'br'+k">{{ s }}</div>
+                </div>
             </div>
         </div>
     </div>
@@ -1018,6 +1093,13 @@ defineExpose({init, show, show2, showRgb, showDirect,
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,0.18),
     0 1px 1px rgba(0,0,0,0.18);
+}
+/* Volume / Fusion box では fusion 起点としてドラッグ可能 */
+.mv-mod-chip--draggable {
+  cursor: grab;
+}
+.mv-mod-chip--draggable:active {
+  cursor: grabbing;
 }
 
 .mv-desc {
@@ -1077,6 +1159,14 @@ defineExpose({init, show, show2, showRgb, showDirect,
   user-select: none;
 }
 
+/* Cross-reference lines: 他 box の slice plane を黄色の破線で投影 */
+.mv-cross-ref {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+}
+
 /* Color scale legend (CLUT bar + min/max labels) */
 .mv-clut-legend {
   position: absolute;
@@ -1110,6 +1200,33 @@ defineExpose({init, show, show2, showRgb, showDirect,
   min-width: 32px;
   text-align: center;
 }
+
+/* 4 隅 patient/exam info overlay (canvas 上に半透明) */
+.mv-corner-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  font-size: 10px;
+  line-height: 1.35;
+  color: rgba(232, 238, 242, 0.92);
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.85), 0 0 1px rgba(0, 0, 0, 0.85);
+  letter-spacing: 0.01em;
+}
+.mv-corner {
+  position: absolute;
+  padding: 4px 6px;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mv-corner-tl { top: 0; left: 0; text-align: left; }
+.mv-corner-tr { top: 0; right: 0; text-align: right; }
+.mv-corner-bl { bottom: 0; left: 0; text-align: left; }
+.mv-corner-br { bottom: 0; right: 0; text-align: right; }
+/* legend が表示されているときは BR を上にずらして衝突回避 */
+.mv-corner-br--lifted { bottom: 32px; }
 
 /* Empty state: centered icon + dim caption */
 .mv-empty-state {

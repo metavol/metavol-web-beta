@@ -15,7 +15,9 @@ export type ImageBoxInfoBase = {
     description: string,
 }
 
-export type DicomImageBoxInfo = ImageBoxInfoBase &  {
+// Raw 1-frame DICOM viewer box (no MPR, no Volume reconstruction).
+// Counterpart of VolumeImageBoxInfo (3D 再構成スライス) / FusedVolumeImageBoxInfo (CT+PET 重畳)。
+export type DicomSliceImageBoxInfo = ImageBoxInfoBase &  {
     currentSliceNumber: number,
     imageNumberOfDicomTag: number | null,
     centerX:number,

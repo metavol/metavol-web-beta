@@ -31,7 +31,6 @@ const emit = defineEmits([
   "leftButtonFunctionChanged",
   "openSample",
   "presetSelected",
-  "changeSeries",
   "changeSlice",
   "phantom1",
   "phantom2",
@@ -59,7 +58,6 @@ const onPresetToggle = (val: string | null | undefined) => {
     presetClicked(val);
   }
 };
-const changeSeries = (e: number) => emit("changeSeries", e);
 const changeSlice = (e: number) => emit("changeSlice", e);
 
 const showAdvanced = ref(false);
@@ -94,17 +92,9 @@ const wPresetsPet = [
         <v-icon icon="mdi-folder-multiple-image" size="x-small" />
         Series
       </div>
-      <div class="mv-btn-row mb-2">
-        <v-btn size="x-small" variant="tonal" @click="changeSeries(-1)">
-          <v-icon icon="mdi-arrow-left" size="small" />
-        </v-btn>
-        <v-btn size="x-small" variant="tonal" @click="changeSeries(1)">
-          <v-icon icon="mdi-arrow-right" size="small" />
-        </v-btn>
-      </div>
       <SeriesList
         :series="seriesSummaries ?? []"
-        @setModality="(p: { index: number; modality: 'PT' | 'CT' }) => emit('setModality', p)"
+        @setModality="(p: { index: number; modality: 'PT' | 'CT' | 'MR' }) => emit('setModality', p)"
         @setActiveForSeg="(p: { index: number; modality: 'PT' | 'CT' }) => emit('setActiveForSeg', p)"
       />
     </section>

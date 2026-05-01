@@ -2,16 +2,40 @@
   <v-app>
     <v-app-bar class="mv-appbar" flat density="compact" :height="48">
       <template v-slot:prepend>
-        <v-btn
-          icon="mdi-menu"
-          variant="text"
-          size="small"
-          @click.stop="drawerLeft = !drawerLeft"
-        />
+        <v-menu>
+          <template v-slot:activator="{ props: act }">
+            <v-btn
+              v-bind="act"
+              icon="mdi-menu"
+              variant="text"
+              size="small"
+            />
+          </template>
+          <v-list density="compact">
+            <v-list-item @click="drawerLeft = !drawerLeft">
+              <template v-slot:prepend>
+                <v-icon icon="mdi-dock-left" size="small" />
+              </template>
+              <v-list-item-title>{{ drawerLeft ? 'Hide sidebar' : 'Show sidebar' }}</v-list-item-title>
+            </v-list-item>
+            <v-list-item
+              :disabled="!canShowTags"
+              @click="onShowTags"
+            >
+              <template v-slot:prepend>
+                <v-icon icon="mdi-tag-text-outline" size="small" />
+              </template>
+              <v-list-item-title>DICOM Tags</v-list-item-title>
+              <v-list-item-subtitle v-if="!canShowTags">
+                Select a DICOM box first
+              </v-list-item-subtitle>
+            </v-list-item>
+          </v-list>
+        </v-menu>
       </template>
 
       <div class="mv-brand ml-1">
-        meta<span class="mv-brand-accent">vol</span>
+        meta<span class="mv-brand-accent">vol</span>-web
       </div>
 
       <v-divider vertical class="mx-3" />
@@ -180,6 +204,18 @@
       </v-btn>
 
       <v-btn
+        :class="['mv-tool-btn', { 'is-active': showOverlayInfo }]"
+        variant="text"
+        size="small"
+        @click="showOverlayInfo = !showOverlayInfo"
+      >
+        <v-icon icon="mdi-information-outline" />
+        <v-tooltip activator="parent" location="bottom">
+          {{ showOverlayInfo ? 'Hide patient/exam info overlay' : 'Show patient/exam info overlay' }}
+        </v-tooltip>
+      </v-btn>
+
+      <v-btn
         class="mv-tool-btn"
         variant="text" size="small"
         @click="changeImageBoxSize(-50)"
@@ -203,6 +239,16 @@
         <v-icon icon="mdi-fit-to-screen-outline" />
         <v-tooltip activator="parent" location="bottom">Fit to window</v-tooltip>
       </v-btn>
+      <v-btn
+        :class="['mv-tool-btn', { 'is-active': noGapMode }]"
+        variant="text" size="small"
+        @click="noGapMode = !noGapMode"
+      >
+        <v-icon icon="mdi-arrow-expand-all" />
+        <v-tooltip activator="parent" location="bottom">
+          {{ noGapMode ? 'Edge-to-edge tiles ON (gap = 0)' : 'Edge-to-edge tiles OFF (click to fill the image area without gaps)' }}
+        </v-tooltip>
+      </v-btn>
 
       <v-divider vertical class="mx-1" />
 
@@ -220,16 +266,6 @@
           </v-list-item>
         </v-list>
       </v-menu>
-
-      <v-btn
-        class="mv-tool-btn"
-        variant="text"
-        size="small"
-        @click="onShowTags"
-      >
-        <v-icon icon="mdi-tag-text-outline" />
-        <v-tooltip activator="parent" location="bottom">DICOM tags (selected box)</v-tooltip>
-      </v-btn>
 
       <v-btn
         class="mv-tool-btn"
@@ -265,6 +301,8 @@
         v-model:syncImageBox="syncImageBox"
         v-model:closingImages="closingImages"
         v-model:debugMode="voxelInspector"
+        v-model:showOverlayInfo="showOverlayInfo"
+        v-model:noGapMode="noGapMode"
       />
     </v-main>
 
@@ -320,6 +358,8 @@ const closingImages = ref(false);
 const tileN = ref(getTileN());
 const syncImageBox = ref(false);
 const voxelInspector = ref(false);
+const showOverlayInfo = ref(true);
+const noGapMode = ref(false);
 
 const tools = [
   { value: 'window',     icon: 'mdi-contrast-circle',       label: 'Window/Level' },
@@ -327,7 +367,7 @@ const tools = [
   { value: 'zoom',       icon: 'mdi-magnify-plus-outline',  label: 'Zoom' },
   { value: 'page',       icon: 'mdi-arrow-up-down',         label: 'Page' },
   { value: 'sphereROI',  icon: 'mdi-circle-outline',        label: 'Sphere ROI' },
-  { value: 'polygonROI', icon: 'mdi-vector-polygon',        label: 'Polygon ROI' },
+  { value: 'polygonROI', icon: 'mdi-pentagon-outline',      label: 'Polygon ROI' },
   { value: 'assignLabel',icon: 'mdi-tag-outline',           label: 'Assign Label' },
 ];
 
@@ -399,6 +439,12 @@ const tagContext = computed(() => {
 const onShowTags = () => {
   tagDialogOpen.value = true;
 };
+
+// メニュー項目の disable 制御:
+// activeTagContext は Volume / Fusion / MIP の Box が選択されているとき null を返す。
+const canShowTags = computed<boolean>(() => {
+  return !!dicomViewRef.value?.activeTagContext;
+});
 
 // ★2: JPEG Lossless decompress 進捗を app-bar に表示
 const jpegProgress = computed(() => {

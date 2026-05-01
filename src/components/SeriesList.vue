@@ -37,7 +37,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-    (e: 'setModality', payload: { index: number; modality: 'PT' | 'CT' }): void;
+    (e: 'setModality', payload: { index: number; modality: 'PT' | 'CT' | 'MR' }): void;
     (e: 'setActiveForSeg', payload: { index: number; modality: 'PT' | 'CT' }): void;
 }>();
 
@@ -90,7 +90,7 @@ const isUnknownModality = (m: string): boolean => {
     return u !== 'PT' && u !== 'PET' && u !== 'CT' && u !== 'MR';
 };
 
-const setModality = (e: MouseEvent, index: number, modality: 'PT' | 'CT') => {
+const setModality = (e: MouseEvent, index: number, modality: 'PT' | 'CT' | 'MR') => {
     e.stopPropagation();
     emit('setModality', { index, modality });
 };
@@ -101,64 +101,30 @@ const otherSeries   = computed(() => props.series.filter(s => !s.isPrimary));
 const showOthers = ref(false);
 
 // ===== サムネ paging (preview only) =====
-// 各カードごとに「現在プレビュー中の slice index」を保持。drag で更新。
+// 各カードごとに「現在プレビュー中の slice index」を保持。wheel で更新。
+// thumbnail からの drag はカード全体の DnD (シリーズロード) のために解放。
 const previewSliceIdx = ref<Map<number, number>>(new Map());     // seriesIdx -> sliceIdx
 const previewThumb     = ref<Map<number, string>>(new Map());    // seriesIdx -> dataURL
 
-// drag セッション state
-let pagingActive = false;
-let pagingSeriesIdx = -1;
-let pagingStartY = 0;
-let pagingStartSlice = 0;
-let pagingTotalSlices = 0;
-
-const PX_PER_SLICE_DENOM = 84; // thumb 高さ。dragY = thumb 高さ → slice 範囲全体
-
-const onThumbMouseDown = (e: MouseEvent, seriesIdx: number) => {
-    // 左ボタンのみ
-    if (e.button !== 0) return;
-    e.preventDefault();
-    e.stopPropagation();
+const onThumbWheel = (e: WheelEvent, seriesIdx: number) => {
     const total = getSliceCount(seriesIdx);
     if (total <= 1) return;
+    e.preventDefault();
+    e.stopPropagation();
 
-    pagingActive = true;
-    pagingSeriesIdx = seriesIdx;
-    pagingStartY = e.clientY;
-    pagingStartSlice = previewSliceIdx.value.get(seriesIdx) ?? Math.floor(total / 2);
-    pagingTotalSlices = total;
-
-    // global listener: thumb から外れても drag 継続
-    window.addEventListener('mousemove', onThumbMouseMoveGlobal);
-    window.addEventListener('mouseup', onThumbMouseUpGlobal);
-    // body cursor を ns-resize に固定 (thumb 範囲外に出ても visual feedback 維持)
-    document.body.style.cursor = 'ns-resize';
-};
-
-const onThumbMouseMoveGlobal = (e: MouseEvent) => {
-    if (!pagingActive) return;
-    const dy = e.clientY - pagingStartY;
-    // dy 1px = (total / 84) slice 進む
-    const deltaSlice = Math.round(dy * pagingTotalSlices / PX_PER_SLICE_DENOM);
-    let newSlice = pagingStartSlice + deltaSlice;
+    const cur = previewSliceIdx.value.get(seriesIdx) ?? Math.floor(total / 2);
+    const step = e.deltaY > 0 ? 1 : -1;
+    let newSlice = cur + step;
     if (newSlice < 0) newSlice = 0;
-    if (newSlice >= pagingTotalSlices) newSlice = pagingTotalSlices - 1;
-    if (previewSliceIdx.value.get(pagingSeriesIdx) === newSlice) return;
+    if (newSlice >= total) newSlice = total - 1;
+    if (newSlice === cur) return;
 
-    previewSliceIdx.value.set(pagingSeriesIdx, newSlice);
-    const thumb = getThumbnailForSlice(pagingSeriesIdx, newSlice);
-    if (thumb) previewThumb.value.set(pagingSeriesIdx, thumb);
+    previewSliceIdx.value.set(seriesIdx, newSlice);
+    const thumb = getThumbnailForSlice(seriesIdx, newSlice);
+    if (thumb) previewThumb.value.set(seriesIdx, thumb);
     // reactive な map 変更通知のため新しい Map を作って差し替え
     previewSliceIdx.value = new Map(previewSliceIdx.value);
     previewThumb.value = new Map(previewThumb.value);
-};
-
-const onThumbMouseUpGlobal = () => {
-    pagingActive = false;
-    pagingSeriesIdx = -1;
-    window.removeEventListener('mousemove', onThumbMouseMoveGlobal);
-    window.removeEventListener('mouseup', onThumbMouseUpGlobal);
-    document.body.style.cursor = '';
 };
 
 // 表示用 thumbnail: paging 中に書き換えがあればそれを使う、なければ初期サムネ
@@ -194,10 +160,8 @@ const sliceLabelFor = (s: { index: number }): string | null => {
         >
             <div
                 class="thumb"
-                draggable="false"
-                @mousedown="(e: MouseEvent) => onThumbMouseDown(e, s.index)"
-                @dragstart.prevent.stop
-                title="Drag up/down on the thumbnail to scrub slices (preview only)"
+                @wheel="(e: WheelEvent) => onThumbWheel(e, s.index)"
+                title="Wheel to scrub slices (preview only)"
             >
                 <img v-if="thumbSrcFor(s)" :src="thumbSrcFor(s) as string" draggable="false" />
                 <div v-else class="thumb-placeholder">
@@ -258,6 +222,7 @@ const sliceLabelFor = (s: { index: number }): string | null => {
                     <span class="hint">Set as:</span>
                     <button class="set-mod" @click="(e) => setModality(e, s.index, 'PT')">PT</button>
                     <button class="set-mod" @click="(e) => setModality(e, s.index, 'CT')">CT</button>
+                    <button class="set-mod" @click="(e) => setModality(e, s.index, 'MR')">MR</button>
                 </div>
             </div>
         </div>
@@ -284,9 +249,8 @@ const sliceLabelFor = (s: { index: number }): string | null => {
                 >
                     <div
                         class="thumb"
-                        draggable="false"
-                        @mousedown="(e: MouseEvent) => onThumbMouseDown(e, s.index)"
-                        @dragstart.prevent.stop
+                        @wheel="(e: WheelEvent) => onThumbWheel(e, s.index)"
+                        title="Wheel to scrub slices (preview only)"
                     >
                         <img v-if="thumbSrcFor(s)" :src="thumbSrcFor(s) as string" draggable="false" />
                         <div v-else class="thumb-placeholder">
@@ -344,9 +308,9 @@ const sliceLabelFor = (s: { index: number }): string | null => {
     display: flex;
     align-items: center;
     justify-content: center;
-    /* paging gesture をしやすく: 縦ドラッグであることを示す cursor */
-    cursor: ns-resize;
     user-select: none;
+    /* card 全体の drag (grab) を継承 */
+    cursor: inherit;
 }
 
 /* paging 中の "87 / 372" オーバーレイラベル */
