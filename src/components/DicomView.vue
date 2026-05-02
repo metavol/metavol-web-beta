@@ -41,6 +41,8 @@ import { isPrimaryForFusion, isRgbSeries } from "./seriesClassify";
 import { buildClutLegend, type ClutLegend } from "./clutLegend";
 import { ensureWasmCodecsReady, isWasmCodecsReady } from "./wasmCodec";
 import { Volume, voxelToWorld, worldToVoxel } from "./Volume.ts";
+import { writeNiftiFloat32, buildVolumeSidecarJson } from "./niftiVolumeWriter";
+import { triggerDownload } from "./segmentation/niftiWriter";
 import { solve } from "./linalg";
 import * as THREE from 'three';
 import {cluts, labelClut} from './Clut.ts';
@@ -492,12 +494,36 @@ const getBoxCurrentClut = (i: number): number | undefined => {
   return (imageBoxInfos.value[i] as VolumeImageBoxInfo).clut;
 };
 
-// suffix 判定: PT は SUV 単位、CT は HU、それ以外は無印
+// suffix 判定: PT は表示単位 (SUV / Bq/ml)、CT は HU、それ以外は無印
 const suffixForModality = (m: string): string => {
   const u = (m ?? '').toUpperCase();
-  if (u === 'PT' || u === 'PET') return 'SUV';
+  if (u === 'PT' || u === 'PET') {
+    return segStore.petDisplayUnit === 'BqMl' ? 'Bq/ml' : 'SUV';
+  }
   if (u === 'CT') return 'HU';
   return '';
+};
+
+// PT 表示単位の換算係数: voxel (SUV) を表示単位に変換するための multiplier。
+// SUV mode: 1。Bq/ml mode: 1/suvFactor。suvFactor 不明時は 1 (legend は 'SUV' のまま)。
+const petDisplayMul = (volMod: string, suvFactor: number | null | undefined): number => {
+  const m = (volMod ?? '').toUpperCase();
+  if ((m !== 'PT' && m !== 'PET') || segStore.petDisplayUnit !== 'BqMl') return 1;
+  if (!suvFactor || !isFinite(suvFactor) || suvFactor <= 0) return 1;
+  return 1 / suvFactor;
+};
+
+// box id の primary series が PT のとき表示単位 multiplier を返す。
+// Window/Level drag で「1 pixel = +1 display unit」を実現するため drag delta を 1/dmul 倍する。
+const getBoxPetDisplayMul = (id: number): number => {
+  if (id < 0 || id >= imageBoxInfos.value.length) return 1;
+  const info = imageBoxInfos.value[id];
+  const sIdx = info?.currentSeriesNumber;
+  if (sIdx == null || sIdx < 0 || sIdx >= seriesList.length) return 1;
+  const series = seriesList[sIdx];
+  const mod = series?.volume?.metadata?.modality
+    ?? (series?.myDicom?.[0]?.string('x00080060') ?? '');
+  return petDisplayMul(mod, series?.volume?.metadata?.suvFactor);
 };
 
 // 主レイヤ legend (DICOM Slice / Volume / Fusion / MIP)。
@@ -513,24 +539,28 @@ const getBoxLegend = (i: number): ClutLegend | undefined => {
     const ww = info.myWW ?? Number(ds.string('x00281051', 0) ?? '1');
     if (!isFinite(wc) || !isFinite(ww) || ww <= 0) return undefined;
     const mod = (ds.string('x00080060') ?? '').toUpperCase();
-    return buildClutLegend(0, wc, ww, suffixForModality(mod));
+    // DICOM 2D box: PT で BqMl mode のとき表示単位換算
+    const mul = petDisplayMul(mod, series?.volume?.metadata?.suvFactor);
+    return buildClutLegend(0, wc * mul, ww * mul, suffixForModality(mod));
   }
   if (!isAnyVolumeBox(i)) return undefined;
   const info = imageBoxInfos.value[i] as VolumeImageBoxInfo;
   if (info.myWC == null || info.myWW == null) return undefined;
-  // Fusion box の場合: legend (主レイヤ) は CT
+  // Fusion box の場合: legend (主レイヤ) は CT (PT が base のときもあり得る)
   if (isFusedImageBoxInfo(i)) {
     const f = info as FusedVolumeImageBoxInfo;
-    const ctSeries = seriesList[f.currentSeriesNumber];
-    const ctMod = ctSeries?.volume?.metadata?.modality
-      ?? (ctSeries?.myDicom?.[0]?.string('x00080060') ?? '').toUpperCase();
-    return buildClutLegend(f.clut, f.myWC!, f.myWW!, suffixForModality(ctMod));
+    const baseSeries = seriesList[f.currentSeriesNumber];
+    const baseMod = baseSeries?.volume?.metadata?.modality
+      ?? (baseSeries?.myDicom?.[0]?.string('x00080060') ?? '').toUpperCase();
+    const baseMul = petDisplayMul(baseMod, baseSeries?.volume?.metadata?.suvFactor);
+    return buildClutLegend(f.clut, f.myWC! * baseMul, f.myWW! * baseMul, suffixForModality(baseMod));
   }
   // Volume / MIP box
   const series = seriesList[info.currentSeriesNumber];
   const mod = series?.volume?.metadata?.modality
     ?? (series?.myDicom?.[0]?.string('x00080060') ?? '').toUpperCase();
-  return buildClutLegend(info.clut, info.myWC!, info.myWW!, suffixForModality(mod));
+  const mul = petDisplayMul(mod, series?.volume?.metadata?.suvFactor);
+  return buildClutLegend(info.clut, info.myWC! * mul, info.myWW! * mul, suffixForModality(mod));
 };
 
 // Crosshair の screen 投影 (Volume / Fusion box のみ意味あり)
@@ -624,7 +654,8 @@ const getBoxLegend2 = (i: number): ClutLegend | undefined => {
   const petSeries = seriesList[f.currentSeriesNumber1];
   const petMod = petSeries?.volume?.metadata?.modality
     ?? (petSeries?.myDicom?.[0]?.string('x00080060') ?? '').toUpperCase();
-  return buildClutLegend(f.clut1, f.myWC1!, f.myWW1!, suffixForModality(petMod));
+  const mul = petDisplayMul(petMod, petSeries?.volume?.metadata?.suvFactor);
+  return buildClutLegend(f.clut1, f.myWC1! * mul, f.myWW1! * mul, suffixForModality(petMod));
 };
 
 // Cross-reference lines: box i 上に他の Volume/Fusion box の slice plane を直線投影。
@@ -900,6 +931,35 @@ const onTitlebarMakeMpr = (i: number) => {
   if (!seriesList[seriesIdx].myDicom || seriesList[seriesIdx].myDicom!.length === 0) return;
   mpr_(seriesIdx);
   showImage(i);
+};
+
+// Box の primary series を Float32 NIfTI で書き出す。
+// PT は SUV 単位 (voxel に suvFactor 適用済み)、CT は HU、MR は raw。
+// Volume が無いシリーズ (DicomSlice 未 MPR) は mpr_ で先に生成する。
+// .nii と .json sidecar (modality / suvFactor / metadata) を 2 ファイル同時ダウンロード。
+const onTitlebarSaveVolumeNifti = (i: number) => {
+  if (i < 0 || i >= imageBoxInfos.value.length) return;
+  const info = imageBoxInfos.value[i];
+  const sIdx = info?.currentSeriesNumber;
+  if (sIdx == null || sIdx < 0 || sIdx >= seriesList.length) return;
+  const series = seriesList[sIdx];
+  if (!series.volume) {
+    if (!mpr_(sIdx)) {
+      alert('Failed to build Volume from this series.');
+      return;
+    }
+  }
+  const vol = series.volume;
+  if (!vol) { alert('No volume to export.'); return; }
+
+  const niftiBlob = writeNiftiFloat32(vol);
+  const sidecarBlob = new Blob([buildVolumeSidecarJson(vol)], { type: 'application/json' });
+
+  const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+  const uidTail = (vol.metadata?.seriesUID ?? `series-${sIdx}`).slice(-32);
+  const baseName = `${uidTail}_${ts}`.replace(/[^A-Za-z0-9._-]/g, '_');
+  triggerDownload(niftiBlob,   `${baseName}.nii`);
+  triggerDownload(sidecarBlob, `${baseName}.json`);
 };
 
 type LeftButtonFunction = "window" | "pan" | "zoom" | "page" | "sphereROI" | "polygonROI" | "assignLabel";
@@ -1257,11 +1317,14 @@ const mouseMove = (e: MouseEvent) => {
       }
       if (ww === null) {
         ww = Number(seriesList[info(id).currentSeriesNumber].myDicom![info(id).currentSliceNumber].string("x00281051", 0)) ?? 0;
-        // ww = Number(dicomDataSetList[id][info(id).currentSliceNumber].string("x00281051", 0)) ?? 0;
       }
-      wc += e.movementY;
-      ww += e.movementX;
-      if (ww < 1) ww = 1;
+      // PT で BqMl 表示中: drag を「1 pixel = +1 display unit」と感じさせるため
+      // 内部 SUV 値への増分を 1/dmul (= suvFactor) 倍にする。それ以外は dmul=1 で従来通り。
+      const dmul = getBoxPetDisplayMul(id);
+      const minWW = dmul !== 0 ? 1 / dmul : 1;
+      wc += e.movementY / dmul;
+      ww += e.movementX / dmul;
+      if (ww < minWW) ww = minWW;
       setMyWCWW(id, wc, ww);
       show();
     }
@@ -2592,30 +2655,49 @@ const mpr = (doShow: boolean) => {
 
 }
 
+// Fusion 単発レイアウト: 選択中 box (or box 0) を CT/MR base + PT overlay の Fusion にする。
+// 旧実装は series 0/1 をハードコードしていたため、PT/CT の順序や tileN=0 状態で破綻していた。
+// 現在は findPetSeriesIndex / findBaseSeriesIndexForFusion で自動判別する。
 const fusion = () => {
+  const petIdx = findPetSeriesIndex();
+  const base = findBaseSeriesIndexForFusion();
+  if (petIdx < 0 || !base) {
+    alert('Fusion requires both a PT series and a CT or MR series.');
+    return;
+  }
+  const baseIdx = base.idx;
+  if (!seriesList[petIdx].volume) { if (!mpr_(petIdx)) return; }
+  if (!seriesList[baseIdx].volume) { if (!mpr_(baseIdx)) return; }
+  const baseVol = seriesList[baseIdx].volume!;
+  const baseP0 = voxelToWorld_(new THREE.Vector3(0, 0, 0), baseIdx);
+  const baseP1 = voxelToWorld_(new THREE.Vector3(baseVol.nx, baseVol.ny, baseVol.nz), baseIdx);
+  const baseCenter = baseP0.add(baseP1).divideScalar(2);
 
-  mpr_(0);
-  mpr_(1);
-  const info = (imageBoxInfos.value[1] as VolumeImageBoxInfo) as VolumeImageBoxInfo;
+  // tileN=0 (起動直後 / Close all 後) なら 1 box 出して target を確保
+  if ((tileN.value ?? 0) <= 0) tileN.value = 1;
 
-  imageBoxInfos.value![0] = {
-    centerInWorld: info.centerInWorld,
-    vecx: info.vecx,
-    vecy: info.vecy,
-    vecz: info.vecz,
-    clut: 2, // white-black
-    clut1: 0, // rainbow
-    currentSeriesNumber: 0,
-    currentSeriesNumber1: 1,
-    description: "fusion",
-    myWC: 3,
-    myWW: 6,
-    myWC1: 40,
-    myWW1: 340,
+  // 書き込み先: 選択中 box が有効ならそこ、無ければ 0
+  const sel = selectedImageBoxId.value;
+  const tgt = (sel >= 0 && sel < imageBoxInfos.value.length) ? sel : 0;
+
+  imageBoxInfos.value[tgt] = {
+    centerInWorld: baseCenter,
+    vecx: baseVol.vectorX.clone(),
+    vecy: baseVol.vectorY.clone(),
+    vecz: baseVol.vectorZ.clone(),
+    clut: 0,                                  // base (CT/MR): gray
+    clut1: 2,                                 // overlay (PT): rainbow
+    currentSeriesNumber: baseIdx,
+    currentSeriesNumber1: petIdx,
+    description: base.modality === 'CT' ? 'Fused CT+PT' : 'Fused MR+PT',
+    myWC: base.modality === 'CT' ? 40 : 0,
+    myWW: base.modality === 'CT' ? 400 : 1000,
+    myWC1: 3, myWW1: 6,                        // PT SUV preset
+    isMip: false, mip: null,
   } as FusedVolumeImageBoxInfo;
 
-  show();
-
+  refreshSegStoreVolumeRefs();
+  showImage(tgt);
 }
 
 
@@ -3338,6 +3420,7 @@ defineExpose({
         @maximize="onTitlebarMaximize(i-1)"
         @toggle-overlay="onTitlebarToggleOverlay(i-1)"
         @make-mpr="onTitlebarMakeMpr(i-1)"
+        @save-volume-nifti="onTitlebarSaveVolumeNifti(i-1)"
         @modality-drag-start="(e: DragEvent) => onModalityDragStart(e, i-1)"
       />
     </div>

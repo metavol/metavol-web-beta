@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import SeriesList from './SeriesList.vue';
+import { useSegmentationStore } from '../stores/segmentation';
 
 defineProps<{
   seriesSummaries?: Array<{
@@ -81,6 +82,16 @@ const wPresetsPet = [
   { id: 'SUV-0-10', label: '0-10' },
   { id: 'SUV-0-15', label: '0-15' },
 ];
+
+// PT 表示単位 (legend / 4-corner / 入力換算に影響。voxel と内部 WC/WW は SUV のまま)。
+const segStore = useSegmentationStore();
+const petUnit = computed<'SUV' | 'BqMl'>(() => segStore.petDisplayUnit);
+const onPetUnitChange = (v: 'SUV' | 'BqMl' | null | undefined) => {
+  if (v === 'SUV' || v === 'BqMl') {
+    segStore.petDisplayUnit = v;
+    emit('redraw');
+  }
+};
 </script>
 
 <template>
@@ -143,9 +154,21 @@ const wPresetsPet = [
         >{{ p.label }}</v-btn>
       </v-btn-toggle>
 
-      <div class="mv-section-title mt-3">
+      <div class="mv-section-title mt-3 mv-pt-header">
         <v-icon icon="mdi-radioactive" size="x-small" />
-        SUV window (PT)
+        <span>PT window</span>
+        <v-btn-toggle
+          :model-value="petUnit"
+          @update:model-value="onPetUnitChange"
+          density="compact"
+          variant="outlined"
+          divided
+          mandatory
+          class="mv-unit-toggle"
+        >
+          <v-btn value="SUV" size="x-small">SUV</v-btn>
+          <v-btn value="BqMl" size="x-small">Bq/ml</v-btn>
+        </v-btn-toggle>
       </div>
       <v-btn-toggle
         :model-value="activePreset"
@@ -210,6 +233,33 @@ const wPresetsPet = [
 /* Window preset segmented control: 横一杯に 6 等分、各 btn を細めに */
 .mv-preset-toggle {
   width: 100%;
+}
+
+/* PT 単位トグル (SUV / Bq/ml) */
+.mv-pt-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.mv-pt-header > span {
+  flex: 0 0 auto;
+}
+.mv-unit-toggle {
+  margin-left: auto;
+  height: 18px;
+}
+.mv-unit-toggle :deep(.v-btn) {
+  min-width: 0 !important;
+  padding: 0 6px !important;
+  font-size: 9px !important;
+  height: 18px !important;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.mv-unit-toggle :deep(.v-btn--active) {
+  background: rgba(0, 212, 170, 0.16) !important;
+  color: var(--mv-accent) !important;
+  border-color: var(--mv-accent-dim) !important;
 }
 .mv-preset-toggle :deep(.v-btn) {
   flex: 1 1 0;

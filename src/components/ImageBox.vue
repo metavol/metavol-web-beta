@@ -60,6 +60,7 @@ const emit = defineEmits<{
   (e: 'maximize'): void;
   (e: 'toggleOverlay'): void;
   (e: 'makeMpr'): void;
+  (e: 'saveVolumeNifti'): void;
   // Modality chip drag start: 親 (DicomView) が dataTransfer を埋めて fusion 起点にする
   (e: 'modalityDragStart', ev: DragEvent): void;
 }>();
@@ -959,6 +960,11 @@ defineExpose({init, show, show2, showRgb, showDirect,
                     <v-list density="compact">
                         <v-list-item @click="onSavePngLocal">
                             <v-list-item-title>Save PNG</v-list-item-title>
+                            <v-list-item-subtitle>Screenshot of this view</v-list-item-subtitle>
+                        </v-list-item>
+                        <v-list-item @click="emit('saveVolumeNifti')">
+                            <v-list-item-title>Save volume as NIfTI</v-list-item-title>
+                            <v-list-item-subtitle>PT=SUV / CT=HU + JSON sidecar</v-list-item-subtitle>
                         </v-list-item>
                         <v-list-item @click="emit('toggleOverlay')">
                             <v-list-item-title>Toggle mask overlay</v-list-item-title>

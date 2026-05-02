@@ -113,6 +113,10 @@ interface State {
     // 選択中の tracer preset id (null = 未選択 = 自動判定 or デフォルト).
     // 個別 PT volume でなく "現在のセッション" 単位で保持する。
     activeTracerId: string | null;
+
+    // PT 表示単位。'SUV' (既定、voxel そのまま) / 'BqMl' (voxel / suvFactor で表示)。
+    // 内部 voxel は常に SUV (dicom2volume.ts で × suvFactor 済み)。toggle は legend / 入力値変換のみに影響。
+    petDisplayUnit: 'SUV' | 'BqMl';
 }
 
 export const useSegmentationStore = defineStore('segmentation', {
@@ -168,6 +172,8 @@ export const useSegmentationStore = defineStore('segmentation', {
         mrRegistrationProgress: null,
 
         activeTracerId: null,
+
+        petDisplayUnit: 'SUV',
     }),
 
     getters: {
