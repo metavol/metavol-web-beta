@@ -30,6 +30,13 @@
                 Select a DICOM box first
               </v-list-item-subtitle>
             </v-list-item>
+            <v-divider />
+            <v-list-item @click="browserSupportOpen = true">
+              <template v-slot:prepend>
+                <v-icon icon="mdi-web" size="small" />
+              </template>
+              <v-list-item-title>Browser support</v-list-item-title>
+            </v-list-item>
           </v-list>
         </v-menu>
       </template>
@@ -313,6 +320,38 @@
       :slice-index="tagContext?.sliceIndex"
       :slice-count="tagContext?.sliceCount"
     />
+
+    <!-- Browser support dialog -->
+    <v-dialog v-model="browserSupportOpen" max-width="540">
+      <v-card>
+        <v-card-title class="text-body-1">Browser support</v-card-title>
+        <v-card-text>
+          <div class="mv-ua-line">{{ userAgent }}</div>
+          <v-list density="compact" class="mv-bs-list">
+            <v-list-item v-for="c in browserChecks" :key="c.name">
+              <template v-slot:prepend>
+                <v-icon
+                  :icon="c.supported ? 'mdi-check-circle' : (c.critical ? 'mdi-alert-circle' : 'mdi-information-outline')"
+                  :color="c.supported ? 'success' : (c.critical ? 'error' : 'warning')"
+                  size="small"
+                />
+              </template>
+              <v-list-item-title>{{ c.name }}</v-list-item-title>
+              <v-list-item-subtitle v-if="!c.supported && !c.critical">
+                Optional — feature unavailable in this browser
+              </v-list-item-subtitle>
+            </v-list-item>
+          </v-list>
+          <p class="mv-bs-note">
+            Best experienced on Chrome or Edge. DICOM/NIfTI loading via drag-and-drop works on Firefox and Safari too.
+          </p>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn @click="browserSupportOpen = false">Close</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </v-app>
 </template>
 
@@ -349,7 +388,8 @@ const petCtReady = computed(() => {
 });
 
 const drawerLeft = ref(true);
-const drawerRight = ref(true);
+// Inspector (右ドロワ) は初期非表示 — segmentation 開始時にユーザが ☰ 横の inspector トグルで開く
+const drawerRight = ref(false);
 const leftButtonFunction = ref<string | null>(null);
 const [w, h] = getWH();
 const imageBoxW = ref(w);
@@ -446,6 +486,24 @@ const canShowTags = computed<boolean>(() => {
   return !!dicomViewRef.value?.activeTagContext;
 });
 
+// Browser support dialog
+const browserSupportOpen = ref(false);
+const userAgent = computed(() => navigator.userAgent);
+const browserChecks = computed(() => {
+  const w = window as unknown as { showDirectoryPicker?: unknown };
+  const hasFolderDrag = typeof DataTransferItem !== 'undefined'
+    && typeof DataTransferItem.prototype !== 'undefined'
+    && 'webkitGetAsEntry' in DataTransferItem.prototype;
+  return [
+    { name: 'File API (FileReader)',         supported: typeof FileReader !== 'undefined', critical: true },
+    { name: 'Drag-and-drop files',           supported: typeof DragEvent !== 'undefined',  critical: true },
+    { name: 'Drag folders into the app',     supported: hasFolderDrag,                     critical: false },
+    { name: 'Folder picker (showDirectoryPicker)', supported: typeof w.showDirectoryPicker === 'function', critical: false },
+    { name: 'Canvas 2D rendering',           supported: typeof HTMLCanvasElement !== 'undefined', critical: true },
+    { name: 'Typed arrays (Float32 / Int16)', supported: typeof Float32Array !== 'undefined' && typeof Int16Array !== 'undefined', critical: true },
+  ];
+});
+
 // ★2: JPEG Lossless decompress 進捗を app-bar に表示
 const jpegProgress = computed(() => {
   const r = dicomViewRef.value;
@@ -534,5 +592,26 @@ const jpegProgress = computed(() => {
 }
 .mv-jpeg-progress-bar {
   border-radius: 2px;
+}
+
+/* Browser support dialog */
+.mv-ua-line {
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  font-size: 11px;
+  color: var(--mv-text-dim, #8FA0B0);
+  word-break: break-all;
+  background: var(--mv-surface-2, #222B36);
+  padding: 6px 8px;
+  border-radius: 3px;
+  margin-bottom: 8px;
+}
+.mv-bs-list {
+  background: transparent !important;
+}
+.mv-bs-note {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--mv-text-dim, #8FA0B0);
+  line-height: 1.5;
 }
 </style>

@@ -169,6 +169,7 @@ const autoFitMode = ref(false);
 
 const applyAutoFit = () => {
   if (!autoFitMode.value) return;
+  if ((tileN.value ?? 0) <= 0) return;     // box が無いときは fit 計算しない
   const { w, h } = fitBoxSizeForCurrentTile();
   imageBoxW.value = w;
   imageBoxH.value = h;
@@ -1867,6 +1868,9 @@ const decompressAllJpegLossless = async (): Promise<void> => {
 
 const loadFiles = (files: FileList | File[]) => {
   initializeDicomListsImagesBoxInfos();
+  // 起動直後 (tileN=0 = box なし) に file を投げ込まれたら最低 1 box 表示してロード進捗を出す。
+  // PT/CT 揃いなら後段で setupPetStandardView が tileN=4 に拡張する。
+  if ((tileN.value ?? 0) <= 0) tileN.value = 1;
   const localFileList = Array.from(files);
 
   isLoading.value = true;
@@ -1879,7 +1883,7 @@ const loadFiles = (files: FileList | File[]) => {
   let intervalId : any | null = null;
   const callback = () => {
     const msg = `${bagOfFiles.length} / ${localFileList.length}`;
-    imb.value![0].clear(msg);
+    if (imb.value && imb.value[0]) imb.value[0].clear(msg);
     if (localFileList.length === bagOfFiles.length){
       clearInterval(intervalId!);
       doSort();
@@ -2777,7 +2781,7 @@ const gridStyle = computed(() => {
 // Vuetify の box-sizing: border-box / scrollbar の有無 / drawer の transition 中の
 // 中間サイズなど計算で詰めると環境依存で必ずズレる。.mv-imagearea 要素を直接測って
 // そこから padding / gap / title bar / safety を引くのが最も堅い。
-const TITLEBAR_H = 26;
+const TITLEBAR_H = 22;
 const GAP_PX = 6;             // .mv-tile-grid の gap
 const SAFETY_PX = 4;          // 各方向のクリッピング保険 (border 1px + 余裕)
 
@@ -3281,7 +3285,15 @@ defineExpose({
   </v-navigation-drawer>
 
   <!-- Image area -->
-  <div class="mv-imagearea" id="hello">
+  <div class="mv-imagearea" id="hello"
+       @dragover.prevent
+       @drop.prevent="(e: DragEvent) => dropFile(e)">
+    <!-- 起動直後 / Close all 後の empty state。box ゼロ時のみ表示 -->
+    <div v-if="(tileN ?? 0) === 0" class="mv-imagearea-empty">
+      <v-icon icon="mdi-image-off-outline" size="56" />
+      <span class="mv-imagearea-empty-title">No image</span>
+      <span class="mv-imagearea-empty-hint">Drop DICOM or NIfTI files (.nii / .nii.gz) here</span>
+    </div>
     <div class="mv-tile-grid" :class="{ 'is-no-gap': noGapMode }" :style="gridStyle">
       <imagebox
         v-for="i in tileN"
@@ -3394,6 +3406,30 @@ defineExpose({
 /* 「全体化」モード: タイル間 gap を排除して画像エリアを最大限活用 */
 .mv-tile-grid.is-no-gap {
   gap: 0;
+}
+
+/* 起動直後 / Close all 後: box ゼロのときの empty state */
+.mv-imagearea-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  color: var(--mv-text-muted, #5A6877);
+  user-select: none;
+  pointer-events: none;
+}
+.mv-imagearea-empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.mv-imagearea-empty-hint {
+  font-size: 11px;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  color: var(--mv-text-dim, #8FA0B0);
 }
 
 .mv-inspector-header {

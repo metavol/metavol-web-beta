@@ -33,3 +33,8 @@ npm run dev
 ## 使い方の詳細
 
 [USAGE.md](./USAGE.md) を参照。
+
+## 用語集 (Glossary)
+
+画面パーツ・ImageBox の種類・ツール・機能名・ドメイン概念をまとめた辞書: [GLOSSARY.md](./GLOSSARY.md)
+（開発者と AI アシスタントとの会話を共通化する用途）。

@@ -1064,13 +1064,13 @@ defineExpose({init, show, show2, showRgb, showDirect,
 .mv-titlebar {
   display: flex;
   align-items: center;
-  height: 28px;
-  padding: 0 6px;
+  height: 22px;
+  padding: 0 5px;
   background: var(--mv-surface-2, #222B36);
   border-bottom: 1px solid var(--mv-border, #2A3441);
-  font-size: 11px;
+  font-size: 10px;
   color: var(--mv-text, #E8EEF2);
-  gap: 8px;
+  gap: 6px;
   user-select: none;
   flex-shrink: 0;
   transition: border-color 0.15s, background 0.15s;
@@ -1121,9 +1121,9 @@ defineExpose({init, show, show2, showRgb, showDirect,
 }
 
 .mv-tb-btn {
-  width: 24px !important;
-  height: 24px !important;
-  min-width: 24px !important;
+  width: 20px !important;
+  height: 20px !important;
+  min-width: 20px !important;
   color: var(--mv-text-muted, #5A6877);
   transition: color 0.12s;
 }
