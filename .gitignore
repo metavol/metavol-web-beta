@@ -26,6 +26,8 @@ pnpm-debug.log*
 
 # Local DICOM sample data (served via /api/cases for dev only)
 sample-data/
+# README は同梱したい (どんなテスト用データを置けば良いかの guide)
+!sample-data/README.md
 
 # Playwright MCP scratch output
 .playwright-mcp/
