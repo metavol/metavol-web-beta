@@ -133,6 +133,11 @@ export const generateVolumeFromDicom = (dcmList: MyDataSet[]) => {
     }
 
     const modality = detectModality(d);
+    // DICOM datatype: BitsAllocated (0028,0100) + PixelRepresentation (0028,0103)
+    //   bits 8/16/32 × signed/unsigned。BitsStored (0028,0101) は通常 same or smaller
+    const bits = d.int16("x00280100") ?? 16;
+    const isSigned = (d.int16("x00280103") ?? 0) === 1;
+    const datatypeName = `${isSigned ? 'Int' : 'Uint'}${bits}`;
     const metadata: VolumeMetadata = {
         modality,
         seriesUID: d.string("x0020000e") ?? undefined,
@@ -140,6 +145,7 @@ export const generateVolumeFromDicom = (dcmList: MyDataSet[]) => {
         suvFactor,
         units: d.string("x00541001") ?? undefined,
         patientWeightKg: d.floatString("x00101030") ?? undefined,
+        datatypeName,
     };
     if (modality === "PT") {
         try {

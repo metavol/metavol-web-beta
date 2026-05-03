@@ -34,6 +34,7 @@ const props = defineProps<{
         isPrimary: boolean;
         isRgb: boolean;
         sourceType: 'DICOM' | 'NIFTI';
+        datatypeName?: string;
     }>;
 }>();
 
@@ -213,6 +214,7 @@ const sliceLabelFor = (s: { index: number }): string | null => {
                 <div class="row4">
                     <span v-if="s.acquisitionTime" class="info-pill">{{ s.acquisitionTime }}</span>
                     <span v-if="s.studyDate" class="info-pill">{{ s.studyDate }}</span>
+                    <span v-if="s.datatypeName" class="info-pill dtype-pill" title="Source voxel datatype (internal store is always Float32)">{{ s.datatypeName }}</span>
                     <span v-if="s.hasVolume" class="vol-tag">VOL</span>
                 </div>
                 <div
@@ -276,7 +278,10 @@ const sliceLabelFor = (s: { index: number }): string | null => {
                             <span v-if="s.isRgb" class="rgb-chip" title="Color (RGB) image">RGB</span>
                         </div>
                         <div class="desc-row" :title="s.description">{{ s.description }}</div>
-                        <div class="row2">{{ s.matrixSize }}</div>
+                        <div class="row2">
+                            {{ s.matrixSize }}
+                            <span v-if="s.datatypeName" class="info-pill dtype-pill ml-1" title="Source voxel datatype">{{ s.datatypeName }}</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -538,6 +543,12 @@ const sliceLabelFor = (s: { index: number }): string | null => {
     background: rgba(255,255,255,0.04);
     padding: 0 4px;
     border-radius: 2px;
+}
+/* datatype 表示用 (Float32 = 緑、整数系 = neutral、unknown は警告色) */
+.dtype-pill {
+    color: #9aa6b2;
+    background: rgba(122, 208, 255, 0.06);
+    border: 1px solid rgba(122, 208, 255, 0.18);
 }
 
 .row-unsupported {

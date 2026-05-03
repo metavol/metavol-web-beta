@@ -107,6 +107,7 @@ interface Nii {
   niftiHeader: nifti.NIFTI1,
   pixelData: Float32Array,
   filename?: string,    // 元ファイル名 (拡張子込み) — modality 推定に使用
+  datatypeName?: string, // 元の datatype label (例 'Float32', 'Uint16')、card 表示用
 }
 
 type OtherFile = Uint8Array;
@@ -154,6 +155,7 @@ export interface SeriesSummary {
   isPrimary: boolean;
   isRgb: boolean;     // RGB / カラー画像 (thumbnail 生成・表示の警告用)
   sourceType: 'DICOM' | 'NIFTI';  // 読み込み元ファイル種別 (Sidebar カードに表示)
+  datatypeName?: string;          // 元データの voxel datatype label (例 'Int16', 'Uint16', 'Float32')
 }
 const seriesSummaries = ref<SeriesSummary[]>([]);
 
@@ -2120,6 +2122,7 @@ const doSort = () => {
             modality: inferredModality,
             seriesUID: `nii-${niftiIdx}-${Date.now()}`,
             seriesDescription: niftiDesc || (f.filename ?? undefined),
+            datatypeName: f.datatypeName,
           },
         }
       });
@@ -2476,16 +2479,35 @@ const loadNii = (arraybuffer: ArrayBuffer, filename?: string) => {
     const hdr = nifti.readHeader(arraybuffer) as nifti.NIFTI1;
     const px: ArrayBuffer = nifti.readImage(hdr, arraybuffer);
 
-    if (hdr["numBitsPerVoxel"] == 32) {
-      const px0 = new Float32Array(px);
-      bagOfFiles.push({ niftiHeader: hdr, pixelData: px0, filename });
-    } else if (hdr["numBitsPerVoxel"] == 64) {
-      const px1 = new Float64Array(px);
-      bagOfFiles.push({ niftiHeader: hdr, pixelData: new Float32Array(px1), filename });
-    } else {
-      const px1 = new Int16Array(px);
-      bagOfFiles.push({ niftiHeader: hdr, pixelData: new Float32Array(px1), filename });
+    // NIFTI datatype code (numBitsPerVoxel だけでは uint8/int8/uint16 等を区別不能)
+    //   2 Uint8 / 4 Int16 / 8 Int32 / 16 Float32 / 64 Float64
+    //   256 Int8 / 512 Uint16 / 768 Uint32 / 1024 Int64
+    const dt = (hdr as any).datatypeCode ?? (hdr as any).datatype ?? -1;
+    let typed: Uint8Array | Int8Array | Int16Array | Uint16Array | Int32Array | Uint32Array | Float32Array | Float64Array | null = null;
+    let datatypeName = '?';
+    switch (dt) {
+      case 2:    typed = new Uint8Array(px);   datatypeName = 'Uint8';   break;
+      case 4:    typed = new Int16Array(px);   datatypeName = 'Int16';   break;
+      case 8:    typed = new Int32Array(px);   datatypeName = 'Int32';   break;
+      case 16:   typed = new Float32Array(px); datatypeName = 'Float32'; break;
+      case 64:   typed = new Float64Array(px); datatypeName = 'Float64'; break;
+      case 256:  typed = new Int8Array(px);    datatypeName = 'Int8';    break;
+      case 512:  typed = new Uint16Array(px);  datatypeName = 'Uint16';  break;
+      case 768:  typed = new Uint32Array(px);  datatypeName = 'Uint32';  break;
+      // 1024/1280 (Int64/Uint64), 32/1792 (Complex), 128/2304 (RGB), 1536 (Float128) は未対応
+      default:
+        // 未知 datatype: numBitsPerVoxel から推測 (legacy fallback)
+        if (hdr.numBitsPerVoxel === 32) { typed = new Float32Array(px); datatypeName = 'Float32?'; }
+        else if (hdr.numBitsPerVoxel === 64) { typed = new Float64Array(px); datatypeName = 'Float64?'; }
+        else if (hdr.numBitsPerVoxel === 16) { typed = new Int16Array(px); datatypeName = 'Int16?'; }
+        else { typed = new Uint8Array(px); datatypeName = `unknown(dt=${dt})`; }
+        console.warn(`[loadNii] unknown NIfTI datatype code ${dt}, falling back by bits=${hdr.numBitsPerVoxel}`);
+        break;
     }
+    // 内部 voxel は Float32 で統一 (rendering pipeline が Float32 想定)。
+    // 既に Float32 ならそのまま、それ以外はコピー変換。
+    const float32 = (typed instanceof Float32Array) ? typed : Float32Array.from(typed as ArrayLike<number>);
+    bagOfFiles.push({ niftiHeader: hdr, pixelData: float32, filename, datatypeName });
   }
 }
 
@@ -3088,6 +3110,16 @@ const rebuildSeriesSummaries = () => {
     const sourceType: 'DICOM' | 'NIFTI' =
       (s.myDicom && s.myDicom.length > 0) ? 'DICOM' : 'NIFTI';
 
+    // Datatype label: 優先順位 (1) volume.metadata.datatypeName (NIfTI / MPR'd DICOM)
+    // (2) DICOM tag (0028,0100 + 0028,0103) — まだ MPR 前でも表示するため
+    let datatypeName: string | undefined = s.volume?.metadata?.datatypeName;
+    if (!datatypeName && s.myDicom && s.myDicom.length > 0) {
+      const ds = s.myDicom[0];
+      const bits = ds.int16("x00280100");
+      const isSigned = (ds.int16("x00280103") ?? 0) === 1;
+      if (bits != null) datatypeName = `${isSigned ? 'Int' : 'Uint'}${bits}`;
+    }
+
     out.push({
       index: i,
       description,
@@ -3108,6 +3140,7 @@ const rebuildSeriesSummaries = () => {
       isPrimary,
       isRgb,
       sourceType,
+      datatypeName,
     });
   }
   seriesSummaries.value = out;

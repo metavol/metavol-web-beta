@@ -28,4 +28,8 @@ export interface VolumeMetadata {
     acquisitionDateTimeIso?: string;
     injectionDateTimeIso?: string;
     decayCorrection?: string;
+
+    // 元データの voxel datatype label (例 'Int16', 'Uint16', 'Float32')。
+    // 内部 voxel は常に Float32 だが、ロード元が何だったかを表示用に保持。
+    datatypeName?: string;
 }
