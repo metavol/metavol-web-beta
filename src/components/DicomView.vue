@@ -1498,6 +1498,40 @@ const doOneOrAll = (id: number, action: (i:number) => void ) => {
   }
 }
 
+// Sync paging compatibility: src と tgt が「同じ plane で paging できる」関係にあるか。
+// MIP / VR は paging ではなく回転なので連動しない (axial で paging しているのに MIP が
+// 勝手に回転するのを防ぐ)。Volume/Fusion 同士なら vecz が平行 (cosθ > 0.95、約 18°以内) で同 plane。
+// DicomSlice は plane 概念を持たないので常に許可。
+const isSyncPagingCompatible = (srcId: number, tgtId: number): boolean => {
+  if (srcId === tgtId) return true;
+  const src = imageBoxInfos.value[srcId] as VolumeImageBoxInfo | undefined;
+  const tgt = imageBoxInfos.value[tgtId] as VolumeImageBoxInfo | undefined;
+  if (!src || !tgt) return false;
+  // src or tgt が MIP/VR なら paging 連動しない (回転と paging が混在しないように)
+  if (src.isMip || src.isVr || tgt.isMip || tgt.isVr) return false;
+  // DicomSlice は paging 概念に互換性あり
+  if (isDicomSliceImageBoxInfo(srcId) || isDicomSliceImageBoxInfo(tgtId)) return true;
+  // Volume/Fusion: vecz の方向が平行なら同 plane
+  if (!src.vecz || !tgt.vecz) return true;  // 不明なら許可
+  const sn = src.vecz.clone().normalize();
+  const tn = tgt.vecz.clone().normalize();
+  const cosT = Math.abs(sn.x * tn.x + sn.y * tn.y + sn.z * tn.z);
+  return cosT > 0.95;
+};
+
+// 同 plane の paging 同期版 doOneOrAll (wheel paging / mouseMove page tool 用)
+const doOneOrAllSamePlane = (id: number, action: (i:number) => void) => {
+  if (syncImageBox.value){
+    for (let i=0; i<imb.value!.length; i++){
+      if (i !== id && !isBoxSyncEnabled(i)) continue;
+      if (i !== id && !isSyncPagingCompatible(id, i)) continue;
+      action(i);
+    }
+  } else {
+    action(id);
+  }
+}
+
 // Pan の実体ロジック（左ボタン pan ツール / Ctrl+中ボタン から共通利用）
 // 注意: target box i ごとに DICOM/Volume を判定する。source id では sync 群内で
 // 混合 (DICOM + Volume) すると panning が破綻するため。
@@ -1574,7 +1608,8 @@ const mouseMove = (e: MouseEvent) => {
 
   if (leftButtonFunction.value == "page") {
     if (e.buttons == 1) {
-      doOneOrAll(id, (i:number) => changeSlice(i, e.movementY));
+      // page tool drag も plane-aware
+      doOneOrAllSamePlane(id, (i:number) => changeSlice(i, e.movementY));
       show();
     }
   }
@@ -1649,7 +1684,8 @@ const wheel = (e: WheelEvent) => {
     }
   }
 
-  doOneOrAll(id, (id: number) => {
+  // wheel paging は plane-aware sync (axial paging で MIP が回転しないように)
+  doOneOrAllSamePlane(id, (id: number) => {
     const change = e.deltaY > 0 ? 1 : -1;
     changeSlice(id, change);
     showImage(id);
@@ -3577,12 +3613,17 @@ const setupPetStandardView = async (overridePetIdx?: number, overrideCtIdx?: num
   } as VolumeImageBoxInfo;
 
   // PET axial: white2black (0=white, high count=black)
+  // CT と同じ mm/pixel になるよう PET vec をスケール (PET 4mm voxel と CT 1mm voxel が
+  // 同じ canvas サイズなら patient が異なるサイズに見えてしまう問題の解消)。
+  // 結果: PET 表示は CT と同じ視野範囲 + 同じ patient 大きさ。voxel は粗いまま。
+  const petMagX = ct.vectorX.length() / pet.vectorX.length();
+  const petMagY = ct.vectorY.length() / pet.vectorY.length();
   imageBoxInfos.value[1] = {
     clut: 1, myWC: 3, myWW: 6, description: "PET axial",
     currentSeriesNumber: petIdx,
-    centerInWorld: petCenter.clone(),
-    vecx: pet.vectorX.clone(),
-    vecy: pet.vectorY.clone(),
+    centerInWorld: ctCenter.clone(),  // CT と中心も揃えると anatomical sync が完成
+    vecx: pet.vectorX.clone().multiplyScalar(petMagX),
+    vecy: pet.vectorY.clone().multiplyScalar(petMagY),
     vecz: pet.vectorZ.clone(),
     isMip: false, mip: null,
   } as VolumeImageBoxInfo;
@@ -3602,15 +3643,17 @@ const setupPetStandardView = async (overridePetIdx?: number, overrideCtIdx?: num
     myWC1: 3,  myWW1: 6,
   } as FusedVolumeImageBoxInfo;
 
-  // PET MIP: white2black
+  // PET MIP: white2black。MIP も CT と同じ mm/pixel に揃える (axial 3 box と MIP の patient
+  // サイズが同じになるよう、CT vectorX.length() を 1mm 基準として使う)
+  const ctStepX = ct.vectorX.length();
   imageBoxInfos.value[3] = {
     clut: 1,
     myWC: 3, myWW: 6,
     description: "PET MIP",
     currentSeriesNumber: petIdx,
     centerInWorld: petCenter.clone(),
-    vecx: pet.vectorX.clone(),
-    vecy: headUpVecy(pet.vectorZ.clone().normalize().multiplyScalar(pet.vectorX.length())),
+    vecx: pet.vectorX.clone().normalize().multiplyScalar(ctStepX),
+    vecy: headUpVecy(pet.vectorZ.clone().normalize().multiplyScalar(ctStepX)),
     vecz: pet.vectorY.clone(),
     isMip: true,
     mip: { mipAngle: 0, isSurface: false, thresholdSurfaceMip: 0.3, depthSurfaceMip: 3 },

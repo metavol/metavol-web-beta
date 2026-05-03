@@ -156,6 +156,42 @@ UI 案: NIfTI series card のメニュー or ☰ から "Inspect NIfTI bytes" �
 
 ---
 
+## 2026-05-03 後半セッションで追加されたトピック
+
+### Fusion MIP / Volume Rendering (次セッション着手予定)
+- 現状 PET Standard の MIP は PT 単独。Fusion MIP (CT 上に PT MIP overlay) は未実装
+- VR 経路 (`drawNiftiVR`) は単一レイヤのみ。Fusion VR を考えると base/overlay 両方のサンプリングが必要
+- 設計検討: 1) Per-ray composite (CT base 自体は 2D slice、PT を rendered としてオーバレイ); 2) 真の volume composite (両者を 3D として ray-cast、blend)
+- Persona 1/3 双方で「PET の集積を全体俯瞰しつつ CT の構造と紐付けたい」需要あり
+
+### Manual ROI 編集の細かい不具合 (詳細未確認、まとめて見直す)
+- polygon が 1 スライスズレるケース (CLAUDE.md 既知バグ #1 関連、修正済? 要確認)
+- erase でラベル波及が不完全 (CLAUDE.md 既知バグ #2 関連)
+- undo stack が大きくなりすぎてメモリリーク傾向の可能性
+- sphere ROI と polygon ROI 同時編集で挙動不定
+- Ctrl+Z で polygon と segmentation mask の両方が undo される / されない不整合
+→ 別セッションで集中的に潰す
+
+### Snapshot / セッション保存・復元 (議論あり、設計未確定)
+- 現状の auto-save は IndexedDB に書込まれている (useAutoSave composable)
+- ユーザー要望: ファイルとして download できると安心
+- 案 A (download): mask + 全 box state + active series UID 等を JSON にして download。リロード後 upload で復元
+- 案 B (login + cloud storage): GitHub Pages では backend 持てないので、Firebase / Supabase / Vercel KV のような BaaS が必要
+- GitHub Pages + 認証: client-side で OAuth は可能 (GitHub App / Auth0 等) だが、保存先 backend は別途必要 (例: gist API でユーザの GitHub gist に保存、Read/Write 権限)
+- 案 C (export-all): 1 case = 1 ZIP (mask.nii + state.json + sidecar) を 1 file で download。最も単純で GitHub Pages のままで OK
+
+### 公開デモデータのホスティング
+- 同 HTML サーバ (GitHub Pages) で `public/demo/*.nii.gz` として配置 → 100MB/file 制限あり、合計 1GB ソフト上限。小さい NIfTI なら OK
+- 巨大 DICOM フォルダは GitHub Releases (2GB/file まで) または別 CDN (Cloudflare R2 / Backblaze B2) を検討
+- 現時点で推奨: 小さい demo (10-50MB level) を `public/demo/` に置き、`?demo=lung01` 等で起動 (loadFromExternalUrls の派生)
+
+### pyradiomics 完全互換 (遠い将来)
+現在の `radiomics.ts` は IBSI/pyradiomics 完全準拠ではない。研究論文用の数値が必要なケースで:
+- IBSI strict gray-level discretization (fixed bin width vs fixed bin count)
+- すべての GLCM / GLRLM / GLSZM / NGTDM / GLDM features (合計 ~75 features)
+- ROI normalization / resampling / interpolation の選択肢
+→ 着手するなら別セッション。pyradiomics リファレンス実装と数値比較しながら進める
+
 ## 次の優先順位 (commit e649358 以降)
 
 1. **DataBox abstraction Phase 1** (P1-A): `BoxTitlebar.vue` 抽出。機能変化なし refactor
