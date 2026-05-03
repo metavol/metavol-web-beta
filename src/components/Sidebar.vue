@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue';
 import SeriesList from './SeriesList.vue';
 import { useSegmentationStore } from '../stores/segmentation';
+import { loadPriorityRules, savePriorityRules, resetPriorityRules, DEFAULT_RULES, type PriorityRule } from './seriesPriorityRules';
 
 defineProps<{
   seriesSummaries?: Array<{
@@ -23,6 +24,7 @@ defineProps<{
     attenuationCorrected?: boolean;
     isPrimary: boolean;
     isRgb: boolean;
+    sourceType: 'DICOM' | 'NIFTI';
   }>;
 }>();
 
@@ -65,6 +67,22 @@ const showAdvanced = ref(false);
 const showSummary = ref(false);
 const showTag = ref(false);
 
+// PET Standard 候補スコアリングの編集可能ルール (localStorage 永続化)
+const priorityRules = ref<PriorityRule[]>(loadPriorityRules());
+const onRulesChanged = () => savePriorityRules(priorityRules.value);
+const addRule = () => {
+  priorityRules.value.push({ pattern: '', modality: 'ANY', weight: 1 });
+  onRulesChanged();
+};
+const removeRule = (i: number) => {
+  priorityRules.value.splice(i, 1);
+  onRulesChanged();
+};
+const resetRules = () => {
+  resetPriorityRules();
+  priorityRules.value = [...DEFAULT_RULES];
+};
+
 // CT 用 (HU window)
 const wPresets = [
   { id: 'Lung',  label: 'Lung'  },
@@ -83,10 +101,25 @@ const wPresetsPet = [
   { id: 'SUV-0-15', label: '0-15' },
 ];
 
+// 高レンジ preset (Bq/ml 表示や非 SUV 系で使用)。Other メニューに格納。
+const wPresetsPetOther = [
+  { id: 'SUV-0-100',   label: '0-100'   },
+  { id: 'SUV-0-1000',  label: '0-1000'  },
+  { id: 'SUV-0-10000', label: '0-10000' },
+];
+
 // PT 表示単位 (legend / 4-corner / 入力換算に影響。voxel と内部 WC/WW は SUV のまま)。
 const segStore = useSegmentationStore();
-const petUnit = computed<'SUV' | 'BqMl'>(() => segStore.petDisplayUnit);
+// NAC PT (= 減衰補正されていない PT) は SUV 換算不可のため SUV モードを禁止し Bq/ml 固定。
+// dicom2volume.ts 側で suvFactor=1 強制 + suvOk=false を設定済み。
+const isNacPt = computed<boolean>(() => {
+  const pt = segStore.petVolumeRef;
+  if (!pt) return false;
+  return pt.metadata?.suvOk === false;
+});
+const petUnit = computed<'SUV' | 'BqMl'>(() => isNacPt.value ? 'BqMl' : segStore.petDisplayUnit);
 const onPetUnitChange = (v: 'SUV' | 'BqMl' | null | undefined) => {
+  if (isNacPt.value) return;  // NAC PT では SUV 切替不可
   if (v === 'SUV' || v === 'BqMl') {
     segStore.petDisplayUnit = v;
     emit('redraw');
@@ -166,7 +199,7 @@ const onPetUnitChange = (v: 'SUV' | 'BqMl' | null | undefined) => {
           mandatory
           class="mv-unit-toggle"
         >
-          <v-btn value="SUV" size="x-small">SUV</v-btn>
+          <v-btn value="SUV" size="x-small" :disabled="isNacPt" :title="isNacPt ? 'SUV not available for non attenuation-corrected PT' : ''">SUV</v-btn>
           <v-btn value="BqMl" size="x-small">Bq/ml</v-btn>
         </v-btn-toggle>
       </div>
@@ -184,6 +217,24 @@ const onPetUnitChange = (v: 'SUV' | 'BqMl' | null | undefined) => {
           :value="p.id"
           size="x-small"
         >{{ p.label }}</v-btn>
+        <v-menu location="bottom">
+          <template v-slot:activator="{ props: act }">
+            <v-btn v-bind="act" size="x-small" :active="!!wPresetsPetOther.find(p => p.id === activePreset)">
+              Other
+              <v-icon icon="mdi-chevron-down" size="x-small" />
+            </v-btn>
+          </template>
+          <v-list density="compact">
+            <v-list-item
+              v-for="p in wPresetsPetOther"
+              :key="p.id"
+              :active="activePreset === p.id"
+              @click="onPresetToggle(p.id)"
+            >
+              <v-list-item-title>{{ p.label }}</v-list-item-title>
+            </v-list-item>
+          </v-list>
+        </v-menu>
       </v-btn-toggle>
 
       <div class="mv-btn-row mt-2">
@@ -216,6 +267,45 @@ const onPetUnitChange = (v: 'SUV' | 'BqMl' | null | undefined) => {
         <div class="mt-2">
           <v-switch label="Show summary" v-model="showSummary" hide-details density="compact" />
           <v-switch label="Show tag" v-model="showTag" hide-details density="compact" />
+        </div>
+
+        <!-- PET Standard 候補スコアリングルール (ATTN > NAC、WB > Lung 等) -->
+        <div class="mv-section-title mt-3">Series priority rules</div>
+        <div class="mv-rules-help text-caption text-disabled mb-1">
+          Higher score wins for default PT/CT pick. + boosts, − avoids.
+        </div>
+        <div class="mv-rules-table">
+          <div v-for="(r, i) in priorityRules" :key="i" class="mv-rule-row">
+            <input
+              class="mv-rule-pat"
+              type="text"
+              v-model="r.pattern"
+              placeholder="substring"
+              @change="onRulesChanged"
+            />
+            <select
+              class="mv-rule-mod"
+              v-model="r.modality"
+              @change="onRulesChanged"
+            >
+              <option value="ANY">ANY</option>
+              <option value="PT">PT</option>
+              <option value="CT">CT</option>
+              <option value="MR">MR</option>
+            </select>
+            <input
+              class="mv-rule-w"
+              type="number"
+              v-model.number="r.weight"
+              step="1"
+              @change="onRulesChanged"
+            />
+            <button class="mv-rule-del" @click="removeRule(i)" title="Delete rule">×</button>
+          </div>
+        </div>
+        <div class="mv-btn-row mt-1">
+          <v-btn size="x-small" variant="tonal" @click="addRule">+ Add</v-btn>
+          <v-btn size="x-small" variant="text" @click="resetRules">Reset to defaults</v-btn>
         </div>
       </div>
     </section>
@@ -274,5 +364,50 @@ const onPetUnitChange = (v: 'SUV' | 'BqMl' | null | undefined) => {
   background: rgba(0, 212, 170, 0.16) !important;
   color: var(--mv-accent) !important;
   border-color: var(--mv-accent-dim) !important;
+}
+
+/* Series priority rules editor */
+.mv-rules-table {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.mv-rule-row {
+  display: grid;
+  grid-template-columns: 1fr 60px 50px 22px;
+  gap: 4px;
+  align-items: center;
+}
+.mv-rule-pat,
+.mv-rule-mod,
+.mv-rule-w {
+  background: var(--mv-surface-2, #1a232b);
+  border: 1px solid var(--mv-border-strong, #3a4a55);
+  color: var(--mv-text);
+  font-size: 11px;
+  padding: 2px 4px;
+  border-radius: 2px;
+  font-family: inherit;
+  width: 100%;
+  box-sizing: border-box;
+}
+.mv-rule-w {
+  text-align: right;
+}
+.mv-rule-del {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--mv-text-muted);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.mv-rule-del:hover {
+  color: var(--mv-error, #FF5C7A);
+  border-color: var(--mv-error, #FF5C7A);
 }
 </style>

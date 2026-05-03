@@ -6,8 +6,7 @@ import { readNiftiMask } from './segmentation/niftiReader';
 import { summarizeLesions, type LesionStat } from './segmentation/maskOps';
 import { triggerDownload } from './segmentation/niftiWriter';
 import { getSuvSanityWarnings, getSuvMetadataSummary } from './suvSanity';
-import { applyRigidToVolume, type RegistrationSnapshot } from './registration/transform';
-import { registerMrToPt } from './registration/registerMrPt';
+// MR-PET registration の handler は App.vue (☰ Preprocessing) に移管済みのため import 不要
 
 const store = useSegmentationStore();
 
@@ -179,77 +178,8 @@ const onFindIslands = () => {
     emit('redraw');
 };
 
-const formatMm = (v: number) => v.toFixed(1);
-const formatDeg = (v: number) => (v * 180 / Math.PI).toFixed(1);
-
-const onRegisterMrPt = async () => {
-    const pt = store.petVolumeRef;
-    const mr = store.mrVolumeRef;
-    if (!pt || !mr) {
-        alert('PT and MR volumes are both required for registration.');
-        return;
-    }
-    // snapshot 確保 (初回 or 既に存在)
-    store.ensureMrRegistrationSnapshot();
-    const snap = store.mrRegistrationSnapshot as RegistrationSnapshot;
-    if (!snap) { alert('Could not capture MR snapshot.'); return; }
-    // snapshot から原状復元してから最適化開始 (既存 transform は破棄)
-    applyRigidToVolume(mr, snap, [0, 0, 0, 0, 0, 0]);
-    store.setMrRegistrationParams(null);
-    store.setMrRegistrationInProgress(true);
-    store.setMrRegistrationProgress(null);
-
-    // setTimeout でブラウザにレンダー機会を渡してから heavy 計算開始
-    await new Promise(r => setTimeout(r, 30));
-    try {
-        const res = registerMrToPt(
-            pt, mr,
-            [0, 0, 0, 0, 0, 0],
-            (info) => {
-                store.setMrRegistrationProgress({
-                    level: info.level, nLevels: info.nLevels,
-                    iter: info.iter, mi: info.bestNegMI,
-                });
-            },
-        );
-        // 最適パラメータを MR に適用
-        applyRigidToVolume(mr, snap, res.params);
-        store.setMrRegistrationParams(res.params as [number, number, number, number, number, number]);
-        console.log(`[mr-pt-reg] done in ${res.elapsedMs.toFixed(0)}ms, ${res.iterationsTotal} iters, MI=${(-res.finalNegMI).toFixed(4)}`);
-        emit('redraw');
-    } catch (err: any) {
-        console.error('[mr-pt-reg] failed', err);
-        alert('Registration failed: ' + (err?.message ?? err));
-    } finally {
-        store.setMrRegistrationInProgress(false);
-    }
-};
-
-const onResetRegistration = () => {
-    const mr = store.mrVolumeRef;
-    const snap = store.mrRegistrationSnapshot as RegistrationSnapshot | null;
-    if (mr && snap) applyRigidToVolume(mr, snap, [0, 0, 0, 0, 0, 0]);
-    store.setMrRegistrationParams(null);
-    store.setMrRegistrationProgress(null);
-    emit('redraw');
-};
-
-const onComputeBodyMask = () => {
-    const ok = store.computeCtBodyMask(-300);
-    if (!ok) {
-        alert('No CT volume loaded.');
-        return;
-    }
-    emit('redraw');
-};
-const onToggleBodyMask = () => {
-    store.toggleCtBodyMaskEnabled();
-    emit('redraw');
-};
-const onClearBodyMask = () => {
-    store.clearCtBodyMask();
-    emit('redraw');
-};
+// MR-PET registration / CT bed removal の handler は App.vue (☰ Preprocessing) に移管。
+// formatMm / formatDeg は他で使われなくなったため削除。
 
 const onSave = () => {
     store.saveMaskAsNifti();
@@ -595,83 +525,7 @@ const polygonModeProxy = computed({
                 Auto-saved {{ autoSavedRel }}
             </div>
 
-            <!-- MR-PET registration (auto, MI-based) — MR + PT 両方ロード時のみ -->
-            <section v-if="store.mrVolumeRef && store.petVolumeRef" class="mv-section">
-                <div class="mv-section-title">
-                    <v-icon icon="mdi-vector-link" size="x-small" />
-                    MR-PET Registration
-                </div>
-                <div class="mv-btn-row">
-                    <v-btn
-                        size="small"
-                        variant="tonal"
-                        color="primary"
-                        :loading="store.mrRegistrationInProgress"
-                        :disabled="store.mrRegistrationInProgress"
-                        @click="onRegisterMrPt"
-                    >
-                        <v-icon icon="mdi-cog-sync" size="small" class="mr-1" />
-                        Auto Register
-                    </v-btn>
-                    <v-btn
-                        v-if="store.mrRegistrationParams"
-                        size="small"
-                        variant="text"
-                        :disabled="store.mrRegistrationInProgress"
-                        @click="onResetRegistration"
-                    >Reset</v-btn>
-                </div>
-                <div v-if="store.mrRegistrationProgress" class="mv-reg-status">
-                    Level {{ store.mrRegistrationProgress.level + 1 }}/{{ store.mrRegistrationProgress.nLevels }}
-                    · iter {{ store.mrRegistrationProgress.iter }}
-                    · MI = {{ (-store.mrRegistrationProgress.mi).toFixed(4) }}
-                </div>
-                <div v-if="store.mrRegistrationParams && !store.mrRegistrationInProgress" class="mv-reg-status mv-reg-params">
-                    T = ({{ formatMm(store.mrRegistrationParams[0]) }},
-                          {{ formatMm(store.mrRegistrationParams[1]) }},
-                          {{ formatMm(store.mrRegistrationParams[2]) }}) mm
-                    R = ({{ formatDeg(store.mrRegistrationParams[3]) }},
-                          {{ formatDeg(store.mrRegistrationParams[4]) }},
-                          {{ formatDeg(store.mrRegistrationParams[5]) }})°
-                </div>
-            </section>
-
-            <!-- CT processing (寝台除去) — CT があるときだけ表示 -->
-            <section v-if="store.ctVolumeRef" class="mv-section">
-                <div class="mv-section-title">
-                    <v-icon icon="mdi-bed-empty" size="x-small" />
-                    CT processing
-                </div>
-                <div class="mv-btn-row">
-                    <v-btn
-                        v-if="!store.ctBodyMask"
-                        size="small"
-                        variant="tonal"
-                        color="primary"
-                        @click="onComputeBodyMask"
-                    >
-                        <v-icon icon="mdi-account" size="small" class="mr-1" />Remove CT bed
-                    </v-btn>
-                    <template v-else>
-                        <v-btn
-                            size="small"
-                            variant="flat"
-                            :color="store.ctBodyMaskEnabled ? 'primary' : undefined"
-                            @click="onToggleBodyMask"
-                        >
-                            <v-icon
-                                :icon="store.ctBodyMaskEnabled ? 'mdi-eye' : 'mdi-eye-off'"
-                                size="small"
-                                class="mr-1"
-                            />
-                            Bed removed: {{ store.ctBodyMaskEnabled ? 'ON' : 'OFF' }}
-                        </v-btn>
-                        <v-btn size="small" variant="text" @click="onClearBodyMask">
-                            Reset
-                        </v-btn>
-                    </template>
-                </div>
-            </section>
+            <!-- MR-PET Registration と CT bed removal は app-bar の ☰ Preprocessing メニューに移動 (2026-05) -->
 
             <!-- Threshold -->
             <section class="mv-section">

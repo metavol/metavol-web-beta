@@ -33,6 +33,7 @@ const props = defineProps<{
         attenuationCorrected?: boolean;
         isPrimary: boolean;
         isRgb: boolean;
+        sourceType: 'DICOM' | 'NIFTI';
     }>;
 }>();
 
@@ -190,6 +191,11 @@ const sliceLabelFor = (s: { index: number }): string | null => {
                         {{ modalityChip(s.modality).text }}
                     </span>
                     <span
+                        class="source-chip"
+                        :class="{ 'is-dicom': s.sourceType === 'DICOM', 'is-nifti': s.sourceType === 'NIFTI' }"
+                        :title="s.sourceType === 'DICOM' ? 'Loaded from DICOM' : 'Loaded from NIfTI (.nii / .nii.gz)'"
+                    >{{ s.sourceType === 'DICOM' ? 'DCM' : 'NII' }}</span>
+                    <span
                         v-if="s.attenuationCorrected !== undefined"
                         class="attn-chip"
                         :class="{ 'is-attn': s.attenuationCorrected, 'is-nac': !s.attenuationCorrected }"
@@ -200,12 +206,11 @@ const sliceLabelFor = (s: { index: number }): string | null => {
                         class="rgb-chip"
                         title="Color (RGB) image — usable as 2D only, not for fusion analysis"
                     >RGB</span>
-                    <span class="desc" :title="s.description">{{ s.description }}</span>
                 </div>
+                <div class="desc-row" :title="s.description">{{ s.description }}</div>
                 <div class="row2">{{ s.matrixSize }}</div>
                 <div class="row3">{{ s.voxelSize }}</div>
                 <div class="row4">
-                    <span v-if="s.fileCount > 0">{{ s.fileCount }} files</span>
                     <span v-if="s.acquisitionTime" class="info-pill">{{ s.acquisitionTime }}</span>
                     <span v-if="s.studyDate" class="info-pill">{{ s.studyDate }}</span>
                     <span v-if="s.hasVolume" class="vol-tag">VOL</span>
@@ -263,13 +268,15 @@ const sliceLabelFor = (s: { index: number }): string | null => {
                             <span class="modality" :style="{ background: modalityChip(s.modality).color }">
                                 {{ modalityChip(s.modality).text }}
                             </span>
+                            <span
+                                class="source-chip"
+                                :class="{ 'is-dicom': s.sourceType === 'DICOM', 'is-nifti': s.sourceType === 'NIFTI' }"
+                                :title="s.sourceType === 'DICOM' ? 'Loaded from DICOM' : 'Loaded from NIfTI (.nii / .nii.gz)'"
+                            >{{ s.sourceType === 'DICOM' ? 'DCM' : 'NII' }}</span>
                             <span v-if="s.isRgb" class="rgb-chip" title="Color (RGB) image">RGB</span>
-                            <span class="desc" :title="s.description">{{ s.description }}</span>
                         </div>
+                        <div class="desc-row" :title="s.description">{{ s.description }}</div>
                         <div class="row2">{{ s.matrixSize }}</div>
-                        <div class="row4">
-                            <span v-if="s.fileCount > 0">{{ s.fileCount }} files</span>
-                        </div>
                     </div>
                 </div>
             </div>
@@ -444,6 +451,16 @@ const sliceLabelFor = (s: { index: number }): string | null => {
     font-weight: 500;
 }
 
+/* description を独立行で表示 (chip 同居だと省略されがちな問題対策) */
+.desc-row {
+    color: var(--mv-text);
+    font-weight: 500;
+    font-size: 11px;
+    line-height: 1.3;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
 .row2, .row3 {
     color: var(--mv-text-dim);
     font-family: 'JetBrains Mono', 'Consolas', monospace;
@@ -490,6 +507,28 @@ const sliceLabelFor = (s: { index: number }): string | null => {
     letter-spacing: 0.04em;
     background: linear-gradient(90deg, #ff5577 0%, #ffd54f 50%, #66cc88 100%);
     color: #0F1419;
+}
+
+.source-chip {
+    font-size: 9px;
+    font-weight: 700;
+    padding: 0 4px;
+    border-radius: 2px;
+    line-height: 1.5;
+    flex-shrink: 0;
+    letter-spacing: 0.04em;
+    border: 1px solid var(--mv-border-strong, #3A4A5C);
+    color: var(--mv-text-dim, #8FA0B0);
+    background: transparent;
+}
+.source-chip.is-dicom {
+    color: #8FA0B0;
+    border-color: #3A4A5C;
+}
+.source-chip.is-nifti {
+    color: #00D4AA;
+    border-color: rgba(0, 212, 170, 0.5);
+    background: rgba(0, 212, 170, 0.08);
 }
 
 .info-pill {

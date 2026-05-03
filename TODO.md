@@ -1,0 +1,118 @@
+# TODO
+
+`metavol-web` の作業 backlog。CLAUDE.md はリポジトリ規約・アーキテクチャの恒久的なリファレンス、こちらは変動の激しいタスク管理を担当する。
+
+---
+
+## 完了済み
+
+- ~~PET 標準ビュー（CT axial / PET axial / Fusion axial / PET MIP の 2×2）ワンクリック~~ ✅
+- ~~MIP にもマスク overlay~~ ✅
+- ~~閾値 UI を combobox 化（2.5 / 3.0 / 3.5 / 4.0 / manual）~~ ✅
+- ~~ラベル波及の仕様再定義（バグ #2 関連）~~ ✅ componentMapValid invalidate
+- ~~UI デザイン全体刷新（モダン化）~~ ✅ 3カラム + ダークテーマ
+- ~~NIfTI ロード対応 (.nii / .nii.gz)~~ ✅ `nifti.isCompressed/decompress`
+- ~~NIfTI ロード時の modality 推定~~ ✅ filename ベース (`detectModalityFromFilename`)。手動指定 UI も SeriesList に存在
+- ~~「全体化」ボタン (edge-to-edge tiles)~~ ✅ `noGapMode`
+- ~~Fusion 操作改善 (modality chip drag-and-drop)~~ ✅
+- ~~Sidebar SERIES 直下の矢印ボタン削除~~ ✅
+- ~~断面支持線 (cross-reference lines)~~ ✅
+- ~~サムネ paging を wheel 化~~ ✅ `onThumbWheel`
+- ~~ImageBox 名称整理 (DicomSliceImageBoxInfo)、4隅 patient/exam overlay、bilinear、Ctrl+wheel ズーム~~ ✅
+- ~~DICOM tag ボタンをハンバーガーメニューに~~ ✅
+- ~~タイトル metavol → metavol-web~~ ✅
+- ~~Polygon ROI アイコン五角形化~~ ✅
+- ~~VolumeBox では DICOM tag view 非対応~~ ✅
+- ~~Series card に DICOM/NIfTI 種別表示~~ ✅ (2026-05-02)
+- ~~ロード後シリーズ数に応じて tileN 自動設定 + 各 Box にシリーズ割当~~ ✅ (2026-05-03) `autoLayoutAfterLoad`
+- ~~Stop / Notification 時の Windows トースト + サウンド~~ ✅ (2026-05-03) `~/.claude/notify.ps1` (後に削除)
+- ~~Inspector 内の preprocessing 系ツール (CT bed removal, MR-PET registration) を ☰ メニューに移管~~ ✅ (2026-05-03)
+- ~~Fusion D&D を DicomSlice からも可能に + Fusion box titlebar に blend slider~~ ✅ (2026-05-03)
+- ~~Series card description 独立行 / "XX files" 削除 / image overlay 即時表示~~ ✅ (2026-05-03)
+- ~~NAC PT は SUV 換算抑止 (suvFactor=1 強制 + Bq/ml 表示)~~ ✅ (2026-05-03)
+- ~~Cross-box mutation: refreshSegStoreVolumeRefs が active を上書きする bug 修正~~ ✅ (2026-05-03)
+- ~~Make MPR (this box) で window/CLUT を保持 + 正しい box id へ書込み~~ ✅ (2026-05-03)
+- ~~PET window preset に 0-100/1000/10000 追加 (Other ▾ pulldown)~~ ✅ (2026-05-03)
+- ~~Fusion box CLUT を base/overlay の 2 ボタン化 (modality badge 付き)~~ ✅ (2026-05-03)
+- ~~Fusion box の W/L drag が base/overlay どっちか明示する toggle~~ ✅ (2026-05-03)
+- ~~ImageBox 複製ボタン (More メニュー → Duplicate this box)~~ ✅ (2026-05-03)
+
+---
+
+## 戦略: 3 ペルソナのエンドツーエンド完成
+
+### Persona 1: PET/CT segmentation (オーソドックスユーザ)
+DICOM ロード → PET Standard → SUV threshold → manual ROI 編集 → MTV/TLG 測定 → NIfTI 保存
+- 現状 90% 完成。Inspector の polygon ROI / Sphere ROI / Labels / Histogram / Save 動線あり
+- 残: lesion 一覧の export 改善、レポート出力 (Phase 2)
+
+### Persona 2: Quick viewer (DICOM/NIfTI さっと見たい)
+URL クリック → ロード → 見て閉じる
+- 現状 70% 完成。ファイル D&D / NIfTI auto-detect 動作
+- 残: URL に file リンクを埋めて即ロードする shareable link、アップロード UI 簡素化、ロゴ/シェア boilerplate 削減
+- 「3 秒以内に画像が出る」UX が目標
+
+### Persona 3: PET/MR + radiomics (ヘビーユーザ)
+別撮影 PT/MR ロード → MR-PET register → MR ベースで ROI → ROI 内 PET radiomics 抽出
+- 現状 40% 完成。Auto-register MR↔PET (☰ Preprocessing) 動作、blend slider あり
+- 残: ROI を MRI で描画 → そのまま PET 値抽出する明示的 workflow、radiomics features の export
+- 課題: 現状 Sphere/Polygon ROI は PET 格子で保持。MRI-defined ROI を PET に転写する path なし
+
+---
+
+## 未着手 / 継続中
+
+- **マスクロード round-trip**: `niftiReader.ts` は実装済だが、SegmentationPanel からの読込フローが segmentation store に反映されるか未検証。書いて読み戻す e2e テストが必要
+- **composable 切り出し**: `DicomView.vue` (~1900行) を `useSphereROI` / `usePolygonROI` / `useDebug` 等に分解
+- **バンドル 500KB 超**: `vite build` 時 warning。manual chunk 分割（vendor / nifti / dcmjs-codecs を分離）
+
+### NIfTI 「raw byte array」表示モード (将来実装、Persona 2 向け)
+
+NIfTI ヘッダの affine / orientation を **無視**して、ファイル内 byte 配列の物理ストレージ順をそのまま画面に再現するモード。
+- innermost dim (= fastest-varying = pixel データの先頭から連続する軸) を **screen X (左→右)**
+- middle dim を **screen Y (上→下)**
+- outermost dim (= slowest-varying) を **paging 方向**
+- WC/WW は voxel 値の min/max から自動推定 (rescale slope/intercept は無視)
+- modality / SUV factor も無視 (raw counts そのまま)
+
+UI 案: NIfTI series card のメニュー or ☰ から "Inspect NIfTI bytes" として開く専用 box。軸ラベルを 4 隅に表示 (例: "X: dim0 (innermost)" / "Y: dim1" / "Z: dim2 (paging)").
+
+背景: NIfTI ヘッダの qform/sform は信頼性が低いケースがある。byte レベルで「データがどう詰まっているか」を見たい用途 (orientation バグの検証、研究用 raw export の確認)。
+
+### Fusion 系統の整理（2026-05-03 検討）
+
+現在 fusion / multi-box layout を起こす経路は 5 系統あり責務が重複している:
+
+| # | 起点 | 実装関数 | 性質 |
+|---|---|---|---|
+| 1 | App-bar 「PET Standard」 | `setupPetStandardView` | 全体レイアウト書換 (2×2) |
+| 2 | App-bar 「Fusion」 | `fusion()` | アクティブ Box 1 つを Fusion 化 |
+| 3 | Layouts プルダウン | `setupTriplanarPt` 等 | 1×3 / 2×2 / 1×2 プリセット |
+| 4 | modality chip drag-and-drop | `fuseSeriesIntoBox` | 対話的、target 平面保持 |
+| 5 | Sidebar series card drop | `onSelectSeriesIntoBox` | シリーズ単純差替（Fusion ではない） |
+
+統合案:
+- **「Fusion」ボタンは廃止**（modality chip drag-and-drop で代替）
+- **「Layouts」プルダウンと「PET Standard」を統合**したコマンドパレット風 UI
+- (5) の card drag は名前を「Load into box」に変えて Fusion と区別
+
+---
+
+## 2026-05-03 追加タスク
+
+### 外部ライブラリーの一覧化 (NOTICES / THIRD_PARTY_LICENSES)
+- `package.json` の dependencies / devDependencies すべてについて、ライブラリー名、バージョン、ライセンス種別 (MIT / Apache-2.0 / BSD-3-Clause 等)、コピーライト表記、入手元 URL を一覧化する
+- 必要なライセンス表示 (license text、attribution) をビルド成果物 (`dist/`) または README に同梱する。MIT/BSD は LICENSE 文の保持が必須
+- 対象（現時点）: `@mdi/font`, `axios`, `dcmjs-codecs`, `dicom-parser`, `jpeg-lossless-decoder-js`, `nifti-reader-js`, `pinia`, `roboto-fontface`, `three`, `vue`, `vuetify`, devDeps（sass、unplugin-fonts、unplugin-vue-components、vite、vite-plugin-vuetify、vue-tsc 他）
+- 自動化: `license-checker` や `npm-license-crawler` で初回生成、以降 dependency 追加時に再走査
+
+### ライブラリー必要性の精査（NOTICES 完成後）
+各 dependency が実際に使われているか / 軽量代替があるか / 自前実装可能かを判定:
+
+- `axios` — 実コードで本当に必要か (fetch で代替可能なら削除)
+- `roboto-fontface` — Inter / JetBrains Mono がメインなら不要可能性
+- `@mdi/font` — 大量のアイコンを含むが実使用は数十個。tree-shake できる alternative (`@mdi/js`) を検討
+- `three` — Volume Rendering / 3D 用途で使用中。voxel / matrix 計算だけなら gl-matrix の方が軽量
+- `dcmjs-codecs` — JPEG Lossless 復号で使用、別エンコーディング DICOM が来ない運用なら不要
+
+削減できればバンドル 500KB 問題の根本対策にもなる。

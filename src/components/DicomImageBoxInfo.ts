@@ -47,6 +47,11 @@ export type FusedVolumeImageBoxInfo = VolumeImageBoxInfo & {
     clut1: number,
     myWC1: number | null,
     myWW1: number | null,
+    // overlay 側のブレンド比 (0..1)。省略時は 0.5 (50/50)。titlebar slider で更新。
+    overlayAlpha?: number,
+    // 左ボタンドラッグ Window/Level 操作の対象レイヤ。'base' or 'overlay'。
+    // 既定は 'overlay' (PT を調整したいケースが多いため)。titlebar の small toggle で切替。
+    activeWindowLayer?: 'base' | 'overlay',
 }
 
 export const defaultInfo = (i: number) => {

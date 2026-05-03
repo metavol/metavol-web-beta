@@ -33,12 +33,24 @@ const detectModality = (d: MyDataSet): Modality => {
 export const generateVolumeFromDicom = (dcmList: MyDataSet[]) => {
 
 
+    // Modality + 減衰補正 (Attenuation Correction) 状態を先に判定。
+    // NonAC (NAC) PT は SUV 換算不可 (減衰補正なしの voxel は SUV 値として無意味)。
+    // → suvFactor = 1 を強制し、voxel は Bq/ml (raw × slope) のまま保持する。
+    const modalityEarly = detectModality(dcmList[0]);
+    const correctedTag = (dcmList[0].string('x00280051') ?? '').toUpperCase();
+    const isAttnCorrected = correctedTag.includes('ATTN');
+    const isNacPt = (modalityEarly === 'PT') && !isAttnCorrected;
+
     // SUV factor を **構造化結果**で取得 (失敗理由・採用パスを保持)
     let suvResult: SuvResult;
     try {
         suvResult = getSuvFactor(dcmList);
     } catch (err) {
         suvResult = { factor: 1, ok: false, reason: `exception: ${(err as Error)?.message ?? err}`, source: 'none' };
+    }
+    // NAC PT は SUV 適用不可。取得した factor を破棄して 1 に戻す。
+    if (isNacPt) {
+        suvResult = { factor: 1, ok: false, reason: 'NonAC PT — SUV not applicable (attenuation correction required)', source: 'none' };
     }
     const suvFactor = suvResult.factor;
 

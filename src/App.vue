@@ -30,6 +30,70 @@
                 Select a DICOM box first
               </v-list-item-subtitle>
             </v-list-item>
+
+            <v-divider />
+
+            <!-- Preprocessing: 一回限りのセットアップ系。Inspector から移管 (2026-05) -->
+            <v-list-subheader class="mv-menu-subheader">Preprocessing</v-list-subheader>
+
+            <!-- CT bed removal: マスク未計算 → 計算ボタン / 計算済 → ON/OFF + Reset -->
+            <v-list-item
+              v-if="!segStore.ctBodyMask"
+              :disabled="!segStore.ctVolumeRef"
+              @click="onComputeBodyMask"
+            >
+              <template v-slot:prepend>
+                <v-icon icon="mdi-bed-empty" size="small" />
+              </template>
+              <v-list-item-title>Remove CT bed</v-list-item-title>
+              <v-list-item-subtitle v-if="!segStore.ctVolumeRef">CT volume required</v-list-item-subtitle>
+            </v-list-item>
+            <v-list-item v-else @click.stop="onToggleBodyMask">
+              <template v-slot:prepend>
+                <v-icon
+                  :icon="segStore.ctBodyMaskEnabled ? 'mdi-eye' : 'mdi-eye-off'"
+                  size="small"
+                  :color="segStore.ctBodyMaskEnabled ? 'primary' : undefined"
+                />
+              </template>
+              <v-list-item-title>CT bed: {{ segStore.ctBodyMaskEnabled ? 'hidden' : 'visible' }}</v-list-item-title>
+              <v-list-item-subtitle>Click to toggle</v-list-item-subtitle>
+              <template v-slot:append>
+                <v-btn
+                  size="x-small"
+                  variant="text"
+                  @click.stop="onClearBodyMask"
+                  title="Reset bed mask"
+                >Reset</v-btn>
+              </template>
+            </v-list-item>
+
+            <!-- MR-PET registration: PT+MR 揃いのときのみ -->
+            <v-list-item
+              :disabled="!canRegisterMrPt || segStore.mrRegistrationInProgress"
+              @click="onRegisterMrPt"
+            >
+              <template v-slot:prepend>
+                <v-icon
+                  :icon="segStore.mrRegistrationInProgress ? 'mdi-cog-sync' : 'mdi-vector-link'"
+                  size="small"
+                  :class="{ 'mv-spin': segStore.mrRegistrationInProgress }"
+                />
+              </template>
+              <v-list-item-title>
+                {{ segStore.mrRegistrationInProgress ? 'Registering MR↔PET…' : 'Auto-register MR ↔ PET' }}
+              </v-list-item-title>
+              <v-list-item-subtitle v-if="!canRegisterMrPt">PT and MR volumes required</v-list-item-subtitle>
+              <template v-if="segStore.mrRegistrationParams && !segStore.mrRegistrationInProgress" v-slot:append>
+                <v-btn
+                  size="x-small"
+                  variant="text"
+                  @click.stop="onResetRegistration"
+                  title="Reset registration to identity"
+                >Reset</v-btn>
+              </template>
+            </v-list-item>
+
             <v-divider />
             <v-list-item @click="browserSupportOpen = true">
               <template v-slot:prepend>
@@ -78,19 +142,88 @@
         />
       </div>
 
+      <!-- MR↔PET registration 進捗 chip (Inspector からハンバーガーへの移管に伴い app-bar に出す) -->
+      <div v-if="segStore.mrRegistrationInProgress" class="mv-jpeg-progress mr-2" style="background: rgba(0, 212, 170, 0.10);">
+        <v-icon icon="mdi-vector-link" size="x-small" class="mr-1 mv-spin" />
+        <span class="mv-jpeg-progress-label">
+          MR↔PET reg
+          <template v-if="segStore.mrRegistrationProgress">
+            L{{ segStore.mrRegistrationProgress.level + 1 }}/{{ segStore.mrRegistrationProgress.nLevels }}
+            · iter {{ segStore.mrRegistrationProgress.iter }}
+            · MI {{ (-segStore.mrRegistrationProgress.mi).toFixed(4) }}
+          </template>
+        </span>
+        <v-progress-linear
+          :indeterminate="!segStore.mrRegistrationProgress"
+          :model-value="mrRegPercent"
+          height="3"
+          color="primary"
+          class="mv-jpeg-progress-bar"
+        />
+      </div>
+
       <v-btn
         class="mv-pet-std-btn mr-1"
         variant="flat"
         size="small"
         :disabled="!petCtReady"
-        @click="petStandardView"
+        @click="onClickPetStandard"
       >
         <v-icon icon="mdi-view-grid" class="mr-1" size="small" />
         PET Standard
         <v-tooltip activator="parent" location="bottom">
-          {{ petCtReady ? '2x2: CT axi / PET axi / Fusion axi / PET MIP' : 'Load both PET and CT first' }}
+          {{ petStandardTooltip }}
         </v-tooltip>
       </v-btn>
+
+      <!-- PET Standard ピッカー (PT or CT が複数あるときだけ開く) -->
+      <v-dialog
+        v-model="petPickerOpen"
+        max-width="520"
+        @after-leave="petPickerCandidates = null"
+      >
+        <v-card v-if="petPickerCandidates" class="pa-4">
+          <div class="text-h6 mb-3">Choose PT and CT for PET Standard</div>
+          <div class="text-caption text-disabled mb-4">
+            Multiple series detected. Pick one PT and one CT to fuse, or click ★ on a series card to set defaults persistently.
+          </div>
+
+          <div class="mv-pet-picker-section">
+            <div class="mv-pet-picker-label">
+              <span class="modality-chip is-pt">PT</span>
+              {{ petPickerCandidates.pt.length }} series
+            </div>
+            <v-radio-group v-model="petPickerSelectedPt" density="compact" hide-details>
+              <v-radio
+                v-for="c in petPickerCandidates.pt"
+                :key="`pt-${c.idx}`"
+                :label="c.label + (c.isActive ? '  (★ active)' : '')"
+                :value="c.idx"
+              />
+            </v-radio-group>
+          </div>
+
+          <div class="mv-pet-picker-section mt-4">
+            <div class="mv-pet-picker-label">
+              <span class="modality-chip is-ct">CT</span>
+              {{ petPickerCandidates.ct.length }} series
+            </div>
+            <v-radio-group v-model="petPickerSelectedCt" density="compact" hide-details>
+              <v-radio
+                v-for="c in petPickerCandidates.ct"
+                :key="`ct-${c.idx}`"
+                :label="c.label + (c.isActive ? '  (★ active)' : '')"
+                :value="c.idx"
+              />
+            </v-radio-group>
+          </div>
+
+          <div class="d-flex justify-end mt-5" style="gap: 8px">
+            <v-btn variant="text" @click="petPickerOpen = false">Cancel</v-btn>
+            <v-btn color="primary" variant="flat" @click="confirmPetPicker">Build</v-btn>
+          </div>
+        </v-card>
+      </v-dialog>
 
       <v-menu>
         <template v-slot:activator="{ props: act }">
@@ -399,7 +532,7 @@ const tileN = ref(getTileN());
 const syncImageBox = ref(false);
 const voxelInspector = ref(false);
 const showOverlayInfo = ref(true);
-const noGapMode = ref(false);
+const noGapMode = ref(true);
 
 const tools = [
   { value: 'window',     icon: 'mdi-contrast-circle',       label: 'Window/Level' },
@@ -435,12 +568,66 @@ const clickItem = (e: any) => {
 };
 
 const dicomViewRef = ref<any>(null);
-const petStandardView = () => {
+
+// PET Standard ピッカー state (PT or CT が複数あるとき開くダイアログ)
+type SeriesCandidate = { idx: number; label: string; isActive: boolean; score: number };
+const petPickerOpen = ref(false);
+const petPickerCandidates = ref<{ pt: SeriesCandidate[]; ct: SeriesCandidate[] } | null>(null);
+const petPickerSelectedPt = ref<number | null>(null);
+const petPickerSelectedCt = ref<number | null>(null);
+
+// PET Standard ボタン: 候補の数で挙動を分岐
+//   - 1 PT × 1 CT → 即実行 (現状通り)
+//   - PT or CT が複数 → ピッカーダイアログを開いて、active or first-found を既定選択
+const onClickPetStandard = () => {
+  const r = dicomViewRef.value;
+  if (!r) return;
+  const cands = r.getPetCtSeriesCandidates?.() as { pt: SeriesCandidate[]; ct: SeriesCandidate[] } | undefined;
+  if (!cands || cands.pt.length === 0 || cands.ct.length === 0) return;
+
+  const ambiguous = cands.pt.length > 1 || cands.ct.length > 1;
+  if (!ambiguous) {
+    runPetStandardWith();
+    return;
+  }
+
+  // 既定選択 (resolvePetCtIndices と同じ優先順位: active → first)
+  const defaultPt = cands.pt.find(c => c.isActive)?.idx ?? cands.pt[0].idx;
+  const defaultCt = cands.ct.find(c => c.isActive)?.idx ?? cands.ct[0].idx;
+  petPickerCandidates.value = cands;
+  petPickerSelectedPt.value = defaultPt;
+  petPickerSelectedCt.value = defaultCt;
+  petPickerOpen.value = true;
+};
+
+const confirmPetPicker = () => {
+  const pt = petPickerSelectedPt.value;
+  const ct = petPickerSelectedCt.value;
+  petPickerOpen.value = false;
+  if (pt == null || ct == null) return;
+  runPetStandardWith(pt, ct);
+};
+
+const runPetStandardWith = (overridePt?: number, overrideCt?: number) => {
   tileN.value = 4;
   setTimeout(() => {
-    dicomViewRef.value?.setupPetStandardView?.();
+    dicomViewRef.value?.setupPetStandardView?.(overridePt, overrideCt);
   }, 50);
 };
+
+// ボタンの tooltip: 解決済の PT/CT description を表示
+const petStandardTooltip = computed(() => {
+  if (!petCtReady.value) return 'Load both PET and CT first';
+  const r = dicomViewRef.value;
+  if (!r) return '2x2: CT axi / PET axi / Fusion axi / PET MIP';
+  const cands = r.getPetCtSeriesCandidates?.() as { pt: SeriesCandidate[]; ct: SeriesCandidate[] } | undefined;
+  if (!cands) return '2x2: CT axi / PET axi / Fusion axi / PET MIP';
+  const ambiguous = cands.pt.length > 1 || cands.ct.length > 1;
+  if (ambiguous) return `Multiple PT/CT detected — click to choose (${cands.pt.length} PT × ${cands.ct.length} CT)`;
+  const pt = cands.pt[0]?.label ?? '';
+  const ct = cands.ct[0]?.label ?? '';
+  return `Build PET Standard with PT: ${pt}  /  CT: ${ct}`;
+});
 
 const runFusion = () => {
   dicomViewRef.value?.fusion?.();
@@ -513,6 +700,75 @@ const jpegProgress = computed(() => {
   const percent = total > 0 ? (done / total) * 100 : 0;
   return { inProgress, done, total, percent };
 });
+
+// ===== Preprocessing menu (ハンバーガーから) =====
+// CT bed removal & MR-PET registration の handlers。Inspector から移管。
+
+const redraw = () => dicomViewRef.value?.redraw?.();
+
+const onComputeBodyMask = () => {
+  if (!segStore.ctVolumeRef) { alert('No CT volume loaded.'); return; }
+  if (!segStore.computeCtBodyMask(-300)) { alert('Failed to compute CT body mask.'); return; }
+  redraw();
+};
+const onToggleBodyMask = () => { segStore.toggleCtBodyMaskEnabled(); redraw(); };
+const onClearBodyMask  = () => { segStore.clearCtBodyMask();        redraw(); };
+
+const canRegisterMrPt = computed(() => !!segStore.petVolumeRef && !!segStore.mrVolumeRef);
+
+const onRegisterMrPt = async () => {
+  if (!canRegisterMrPt.value) {
+    alert('PT and MR volumes are both required for registration.');
+    return;
+  }
+  // 動的 import で重い registration コードを実行時のみロード (bundle 分割効果)
+  const [{ registerMrToPt }, { applyRigidToVolume }] = await Promise.all([
+    import('./components/registration/registerMrPt'),
+    import('./components/registration/transform'),
+  ]);
+  const pt = segStore.petVolumeRef!;
+  const mr = segStore.mrVolumeRef!;
+  segStore.ensureMrRegistrationSnapshot();
+  const snap = segStore.mrRegistrationSnapshot;
+  if (!snap) { alert('Could not capture MR snapshot.'); return; }
+  applyRigidToVolume(mr, snap, [0, 0, 0, 0, 0, 0]);
+  segStore.setMrRegistrationParams(null);
+  segStore.setMrRegistrationInProgress(true);
+  segStore.setMrRegistrationProgress(null);
+  await new Promise(r => setTimeout(r, 30));
+  try {
+    const res = registerMrToPt(pt, mr, [0, 0, 0, 0, 0, 0], (info) => {
+      segStore.setMrRegistrationProgress({
+        level: info.level, nLevels: info.nLevels,
+        iter: info.iter, mi: info.bestNegMI,
+      });
+    });
+    applyRigidToVolume(mr, snap, res.params);
+    segStore.setMrRegistrationParams(res.params as [number, number, number, number, number, number]);
+    redraw();
+  } catch (err: any) {
+    alert('Registration failed: ' + (err?.message ?? err));
+  } finally {
+    segStore.setMrRegistrationInProgress(false);
+  }
+};
+
+const onResetRegistration = async () => {
+  const { applyRigidToVolume } = await import('./components/registration/transform');
+  const mr = segStore.mrVolumeRef;
+  const snap = segStore.mrRegistrationSnapshot;
+  if (mr && snap) applyRigidToVolume(mr, snap, [0, 0, 0, 0, 0, 0]);
+  segStore.setMrRegistrationParams(null);
+  segStore.setMrRegistrationProgress(null);
+  redraw();
+};
+
+// 進捗 chip 用パーセンテージ (level + iter から大まかに推定)
+const mrRegPercent = computed(() => {
+  const p = segStore.mrRegistrationProgress;
+  if (!p || p.nLevels <= 0) return 0;
+  return Math.min(100, (p.level / p.nLevels) * 100);
+});
 </script>
 
 <style scoped>
@@ -544,6 +800,46 @@ const jpegProgress = computed(() => {
 .mv-pet-std-btn:hover {
   background: #00B894 !important;
 }
+
+/* Hamburger menu subheader (Preprocessing 等) */
+.mv-menu-subheader {
+  font-size: 9px !important;
+  letter-spacing: 0.08em;
+  color: var(--mv-text-muted) !important;
+  text-transform: uppercase;
+  min-height: 24px !important;
+  padding-left: 12px !important;
+}
+
+/* MR↔PET reg / spinner icon */
+@keyframes mv-spin {
+  from { transform: rotate(0); }
+  to   { transform: rotate(360deg); }
+}
+.mv-spin {
+  animation: mv-spin 1.2s linear infinite;
+}
+
+/* PET Standard ピッカーダイアログ */
+.mv-pet-picker-section .mv-pet-picker-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mv-text);
+  margin-bottom: 4px;
+}
+.modality-chip {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 2px;
+  letter-spacing: 0.04em;
+  color: #0F1419;
+}
+.modality-chip.is-pt { background: #ff9b3a; }
+.modality-chip.is-ct { background: #7ad0ff; }
 
 :deep(.mv-tool-btn--wide) {
   width: auto !important;

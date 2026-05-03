@@ -227,39 +227,9 @@ Volume 単独 / Fusion 両方をハンドル（`isVolumeImageBoxInfo` は `clut1
 
 ---
 
-## TODO（中期）
+## TODO
 
-- ~~PET 標準ビュー（CT axial / PET axial / Fusion axial / PET MIP の 2×2）ワンクリック~~ ✅ 実装済
-- ~~MIP にもマスク overlay~~ ✅ 実装済
-- ~~閾値 UI を combobox 化（2.5 / 3.0 / 3.5 / 4.0 / manual）~~ ✅ 実装済
-- ~~ラベル波及の仕様再定義（バグ #2 関連）~~ ✅ componentMapValid invalidate で対応済
-- ~~UI デザイン全体刷新（モダン化）~~ ✅ 3カラム + ダークテーマで実施済
-- NIfTI ロード時の modality 手動指定（未実装）
-- マスクロード（書いたものを読み戻す）対応で round-trip 検証（未実装）
-- composable 切り出し（`useSphereROI`, `usePolygonROI`）で `DicomView.vue` を縮小（未実装）
-- バンドルが 500KB 超え → manual chunk 分割の検討（未対応、`vite build` 時に warning）
-
-### 2026-05-01 追加タスク（次セッションで着手）
-
-優先順位は未確定。実装時に整理する。
-
-- **NIfTI ロード対応**: `.nii` と `.nii.gz` 両方を読めるようにする（gzip は `pako` などで解凍）。modality は当面手動指定 UI とセットで考える
-- **「全体化」ボタン**: tile 数（例: 6 枚）に応じて画像エリア全体を隙間なく埋めるレイアウト。`autoFitMode` の発展で `imageBoxW/H` を画像エリアサイズから逆算
-- **Fusion の操作改善**: 現状の Fusion ボタンはどの 2 つを fuse するのか不明瞭。各 ImageBox に表示中シリーズの **modality アイコンをドラッグハンドル**として置き、別の ImageBox にドロップするとその 2 つで Fusion になる UX を検討
-- **Sidebar 上部 SERIES ラベル直下の矢印ボタン 2 個を削除**（用途不明 / 不要）
-- **断面支持線（cross-reference lines）**: 各 ImageBox に他の直交断面の現在位置を線で表示。MPR 3 面を見ながらの位置同定を改善
-- **サムネイル画像の挙動変更**:
-  - サムネからのドラッグスタートを可能にするため、現在サムネに割当てている **paging（ドラッグでスライス送り）を削除**
-  - 代わりにサムネ上で **マウスホイールによる paging** を有効化
-- **ImageBox 名称の整理**: VolumeBox ではない「DICOM 1 枚を表示する素のボックス」を何と呼ぶか命名する。そのボックスに以下を追加:
-  - **カラースケール表示**（現状未表示）
-  - **患者情報・撮影情報を 4 隅に表示**、グローバルトグルで ON/OFF
-  - **Ctrl+wheel ズーム対応**（Volume / Fusion はすでに対応済み、DICOM 単票はまだ）
-  - **補間を nearest → bilinear に変更**（既定）
-- **DICOM tag ボタンの配置変更**: アイコン単独ではわかりにくいので、`...` メニューもしくは左上ハンバーガーメニュー内に移す
-- **タイトル変更**: 「metavol」を「metavol-web」に
-- **Polygon ROI のアイコンを五角形に**変更
-- **VolumeBox では DICOM tag view を非対応に**（タグは生 DICOM 画面でのみ意味があるため）
+タスク管理は別ファイル [TODO.md](./TODO.md) を参照。CLAUDE.md は変動の少ない規約・アーキテクチャ用、TODO.md は流動的な作業 backlog。
 
 ---
 

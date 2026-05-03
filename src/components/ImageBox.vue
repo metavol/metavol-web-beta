@@ -49,6 +49,14 @@ const prop = defineProps<{
   // 断面支持線 (cross-reference lines)。他 box の slice plane を投影した線分。
   // canvas pixel 座標。undefined / 空配列なら描画しない。
   crossRefLines?: Array<{ x1: number; y1: number; x2: number; y2: number }>;
+  // Fusion overlay ブレンド比 (0..1)。Fusion box の titlebar slider 用。Fusion 以外では未使用。
+  overlayAlpha?: number;
+  // Fusion box の base / overlay 識別 (titlebar CLUT ボタン badge 用)
+  baseModality?: string;        // 例: 'CT', 'MR'
+  overlayModality?: string;     // 例: 'PT'
+  overlayClut?: number;         // overlay レイヤの現在 CLUT id (clut1)
+  // Fusion box: Window/Level drag が作用するレイヤ ('base' | 'overlay')。'base' なら base 側、それ以外は overlay 側
+  activeWindowLayer?: 'base' | 'overlay';
 }>();
 
 const emit = defineEmits<{
@@ -63,11 +71,27 @@ const emit = defineEmits<{
   (e: 'saveVolumeNifti'): void;
   // Modality chip drag start: 親 (DicomView) が dataTransfer を埋めて fusion 起点にする
   (e: 'modalityDragStart', ev: DragEvent): void;
+  // Fusion overlay blend ratio 変更 (0..1)
+  (e: 'setOverlayAlpha', v: number): void;
+  // Fusion overlay レイヤの CLUT 変更
+  (e: 'setOverlayClut', clutIdx: number): void;
+  // Box 複製: 同じ表示内容で別インスタンスを新規 box として追加
+  (e: 'duplicateBox'): void;
+  // Fusion box: Window/Level drag の対象レイヤを切替 ('base' | 'overlay')
+  (e: 'setActiveWindowLayer', layer: 'base' | 'overlay'): void;
 }>();
 
-// Modality chip drag は volume / fusion box でのみ有効 (DICOM 2D / MIP 用ではない)
+// Fusion box の overlay clut が active か判定 (clut1 用)
+const isOverlayClutActive = (itemId: number): boolean => {
+  if (prop.overlayClut == null) return false;
+  if (itemId === -1) return false;
+  return (prop.overlayClut & ~1) === itemId;
+};
+
+// Modality chip drag: Volume / Fusion / DicomSlice いずれからも fusion を起動できる。
+// MIP / VR は除外 (drag start handler 側で別途チェック)。
 const isModalityChipDraggable = (): boolean => {
-  return prop.boxKind === 'volume' || prop.boxKind === 'fusion';
+  return prop.boxKind === 'volume' || prop.boxKind === 'fusion' || prop.boxKind === 'dicom';
 };
 
 const isEnter = ref(false);
@@ -347,6 +371,7 @@ const drawNiftiSliceFusion = async function(pix0: Float32Array | Int16Array,
     p00_1:THREE.Vector3, v01_1:THREE.Vector3,v10_1:THREE.Vector3, clut1: number[][],
     overlay?: MaskOverlay,
     bodyMask?: Uint8Array,    // CT 寝台除去用 (pix0=CT 想定)
+    alpha: number = 0.5,      // overlay (pix1) ブレンド比 0..1。base は (1-alpha)。
   ) {
 
       if (cv1.value === null || ctx === null) return;
@@ -355,6 +380,8 @@ const drawNiftiSliceFusion = async function(pix0: Float32Array | Int16Array,
       const canvasy = cv1.value.height;
       const myImageData = ctx.getImageData(0,0,canvasx,canvasy); // メモリーを新たに確保しないので、createImageDataよりも有利だと思う（想像）
       let ad = 0;
+      const baseW = 1 - alpha;
+      const ovlW = alpha;
 
       for (let i = 0; i<canvasy; i++){
         let v_0 = p00_0.clone().addScaledVector(v01_0,i);
@@ -374,13 +401,13 @@ const drawNiftiSliceFusion = async function(pix0: Float32Array | Int16Array,
             let p = Math.floor((raw-(wc0-ww0/2)) * (255/ww0));
             if (p<0) p=0;
             if (p>255) p=255;
-            myImageData.data[ad] = clut0[p][0] * 0.5; //red
-            myImageData.data[ad+1] = clut0[p][1] * 0.5; //green
-            myImageData.data[ad+2] = clut0[p][2] * 0.5; //blue
+            myImageData.data[ad] = clut0[p][0] * baseW; //red
+            myImageData.data[ad+1] = clut0[p][1] * baseW; //green
+            myImageData.data[ad+2] = clut0[p][2] * baseW; //blue
           }else{
-            myImageData.data[ad] = clut0[0][0] * 0.5;
-            myImageData.data[ad+1] = clut0[0][1] * 0.5;
-            myImageData.data[ad+2] = clut0[0][2] * 0.5;
+            myImageData.data[ad] = clut0[0][0] * baseW;
+            myImageData.data[ad+1] = clut0[0][1] * baseW;
+            myImageData.data[ad+2] = clut0[0][2] * baseW;
           }
 
           // PET layer: trilinear sampling (低解像 PET を CT 上に重ねるときに滑らか)
@@ -389,13 +416,13 @@ const drawNiftiSliceFusion = async function(pix0: Float32Array | Int16Array,
             let p = Math.floor((rawPet-(wc1-ww1/2)) * (255/ww1));
             if (p<0) p=0;
             if (p>255) p=255;
-            myImageData.data[ad] += clut1[p][0] * 0.5; //red
-            myImageData.data[ad+1] += clut1[p][1] * 0.5; //green
-            myImageData.data[ad+2] += clut1[p][2] * 0.5; //blue
+            myImageData.data[ad] += clut1[p][0] * ovlW; //red
+            myImageData.data[ad+1] += clut1[p][1] * ovlW; //green
+            myImageData.data[ad+2] += clut1[p][2] * ovlW; //blue
           }else{
-            myImageData.data[ad] += clut1[0][0] * 0.5;
-            myImageData.data[ad+1] += clut1[0][1] * 0.5;
-            myImageData.data[ad+2] += clut1[0][2] * 0.5;
+            myImageData.data[ad] += clut1[0][0] * ovlW;
+            myImageData.data[ad+1] += clut1[0][1] * ovlW;
+            myImageData.data[ad+2] += clut1[0][2] * ovlW;
           }
 
           if (overlay && vm){
@@ -912,7 +939,8 @@ defineExpose({init, show, show2, showRgb, showDirect,
                     </v-list>
                 </v-menu>
 
-                <v-menu v-if="isVolumeKind()" location="bottom end">
+                <!-- CLUT (single layer: Volume / MIP / VR) -->
+                <v-menu v-if="isVolumeKind() && prop.boxKind !== 'fusion'" location="bottom end">
                     <template v-slot:activator="{ props: act }">
                         <v-btn v-bind="act" icon variant="text" size="x-small" class="mv-tb-btn">
                             <v-icon icon="mdi-palette" size="small" />
@@ -927,6 +955,77 @@ defineExpose({init, show, show2, showRgb, showDirect,
                         </v-list-item>
                     </v-list>
                 </v-menu>
+
+                <!-- CLUT for Fusion: base + overlay の 2 ボタン (どちらか不明問題の対応) -->
+                <v-menu v-if="prop.boxKind === 'fusion'" location="bottom end">
+                    <template v-slot:activator="{ props: act }">
+                        <v-btn v-bind="act" icon variant="text" size="x-small" class="mv-tb-btn mv-tb-clut-base">
+                            <v-icon icon="mdi-palette" size="small" />
+                            <span class="mv-tb-clut-mod" :style="{ background: modalityChipColor(prop.baseModality) }">{{ prop.baseModality || '' }}</span>
+                            <v-tooltip activator="parent" location="bottom">Color (CLUT) — base layer ({{ prop.baseModality || '' }})</v-tooltip>
+                        </v-btn>
+                    </template>
+                    <v-list density="compact">
+                        <v-list-subheader>Base ({{ prop.baseModality || '' }}) CLUT</v-list-subheader>
+                        <v-list-item v-for="c in clutItems" :key="c.id"
+                                     :active="isClutActive(c.id)"
+                                     @click="emit('setClut', c.id)">
+                            <v-list-item-title>{{ c.label }}</v-list-item-title>
+                        </v-list-item>
+                    </v-list>
+                </v-menu>
+                <v-menu v-if="prop.boxKind === 'fusion'" location="bottom end">
+                    <template v-slot:activator="{ props: act }">
+                        <v-btn v-bind="act" icon variant="text" size="x-small" class="mv-tb-btn mv-tb-clut-ovl">
+                            <v-icon icon="mdi-palette" size="small" />
+                            <span class="mv-tb-clut-mod" :style="{ background: modalityChipColor(prop.overlayModality) }">{{ prop.overlayModality || '' }}</span>
+                            <v-tooltip activator="parent" location="bottom">Color (CLUT) — overlay ({{ prop.overlayModality || '' }})</v-tooltip>
+                        </v-btn>
+                    </template>
+                    <v-list density="compact">
+                        <v-list-subheader>Overlay ({{ prop.overlayModality || '' }}) CLUT</v-list-subheader>
+                        <v-list-item v-for="c in clutItems" :key="c.id"
+                                     :active="isOverlayClutActive(c.id)"
+                                     @click="emit('setOverlayClut', c.id)">
+                            <v-list-item-title>{{ c.label }}</v-list-item-title>
+                        </v-list-item>
+                    </v-list>
+                </v-menu>
+
+                <!-- Fusion W/L active layer toggle (Fusion box のみ): Window/Level drag が
+                     どっち side に効くか明示。CLUT 同様の disambiguation。 -->
+                <v-btn
+                    v-if="prop.boxKind === 'fusion'"
+                    icon variant="text" size="x-small"
+                    class="mv-tb-btn mv-tb-wl-layer"
+                    @click="emit('setActiveWindowLayer', (prop.activeWindowLayer === 'base') ? 'overlay' : 'base')"
+                >
+                    <v-icon icon="mdi-contrast-circle" size="small" />
+                    <span class="mv-tb-clut-mod" :style="{ background: modalityChipColor((prop.activeWindowLayer === 'base') ? prop.baseModality : prop.overlayModality) }">
+                        {{ ((prop.activeWindowLayer === 'base') ? prop.baseModality : prop.overlayModality) || '' }}
+                    </span>
+                    <v-tooltip activator="parent" location="bottom">
+                        W/L drag affects: {{ (prop.activeWindowLayer === 'base') ? prop.baseModality : prop.overlayModality }} (click to switch)
+                    </v-tooltip>
+                </v-btn>
+
+                <!-- Fusion blend slider (Fusion box のみ表示) -->
+                <div v-if="prop.boxKind === 'fusion'" class="mv-tb-blend">
+                    <v-icon icon="mdi-circle-multiple-outline" size="x-small" class="mv-tb-blend-icon" />
+                    <v-slider
+                        :model-value="prop.overlayAlpha ?? 0.5"
+                        :min="0" :max="1" :step="0.05"
+                        density="compact"
+                        hide-details
+                        color="primary"
+                        track-color="surface-light"
+                        class="mv-tb-blend-slider"
+                        @update:model-value="(v: number | number[]) => emit('setOverlayAlpha', Array.isArray(v) ? v[0] : v)"
+                    />
+                    <v-tooltip activator="parent" location="bottom">
+                        Overlay {{ Math.round((prop.overlayAlpha ?? 0.5) * 100) }}% / Base {{ 100 - Math.round((prop.overlayAlpha ?? 0.5) * 100) }}%
+                    </v-tooltip>
+                </div>
 
                 <v-btn icon variant="text" size="x-small" class="mv-tb-btn"
                        @click="emit('resetView')">
@@ -958,6 +1057,11 @@ defineExpose({init, show, show2, showRgb, showDirect,
                         </v-btn>
                     </template>
                     <v-list density="compact">
+                        <v-list-item @click="emit('duplicateBox')">
+                            <v-list-item-title>Duplicate this box</v-list-item-title>
+                            <v-list-item-subtitle>Create another box with the same view</v-list-item-subtitle>
+                        </v-list-item>
+                        <v-divider />
                         <v-list-item @click="onSavePngLocal">
                             <v-list-item-title>Save PNG</v-list-item-title>
                             <v-list-item-subtitle>Screenshot of this view</v-list-item-subtitle>
@@ -1144,6 +1248,52 @@ defineExpose({init, show, show2, showRgb, showDirect,
 }
 .mv-tb-close:hover {
   color: var(--mv-error, #FF5C7A);
+}
+
+/* Fusion blend slider in titlebar */
+.mv-tb-blend {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+  height: 22px;
+  min-width: 0;
+}
+.mv-tb-blend-icon {
+  color: var(--mv-text-muted, #5A6877);
+  flex: 0 0 auto;
+}
+.mv-tb-blend-slider {
+  width: 80px !important;
+  min-width: 60px;
+  flex: 0 0 auto;
+}
+.mv-tb-blend-slider :deep(.v-slider__container) {
+  min-height: 0;
+}
+.mv-tb-blend-slider :deep(.v-slider-thumb__surface) {
+  width: 10px !important;
+  height: 10px !important;
+}
+.mv-tb-blend-slider :deep(.v-slider-track) {
+  height: 2px !important;
+}
+
+/* Fusion CLUT ボタンに添える modality badge (base/overlay 識別) */
+.mv-tb-clut-base, .mv-tb-clut-ovl {
+  width: auto !important;
+  min-width: 32px !important;
+  padding: 0 4px !important;
+  gap: 2px;
+}
+.mv-tb-clut-mod {
+  font-size: 8px;
+  font-weight: 700;
+  color: #0F1419;
+  padding: 0 3px;
+  border-radius: 2px;
+  letter-spacing: 0.04em;
+  line-height: 1.3;
 }
 
 /* Canvas + empty state overlay container */
