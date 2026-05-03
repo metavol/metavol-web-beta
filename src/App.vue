@@ -95,6 +95,31 @@
             </v-list-item>
 
             <v-divider />
+
+            <!-- Inspect NIfTI raw bytes (Persona 2 デバッグ用): NIfTI series が 1 つ以上あるときだけ表示 -->
+            <v-menu v-if="niftiSeriesList.length > 0" location="end">
+              <template v-slot:activator="{ props: act }">
+                <v-list-item v-bind="act">
+                  <template v-slot:prepend>
+                    <v-icon icon="mdi-database-search-outline" size="small" />
+                  </template>
+                  <v-list-item-title>Inspect NIfTI raw bytes</v-list-item-title>
+                  <v-list-item-subtitle>Bypass affine — show storage order</v-list-item-subtitle>
+                </v-list-item>
+              </template>
+              <v-list density="compact">
+                <v-list-item
+                  v-for="s in niftiSeriesList"
+                  :key="s.idx"
+                  @click="onInspectNiftiRaw(s.idx)"
+                >
+                  <v-list-item-title>{{ s.description }}</v-list-item-title>
+                </v-list-item>
+              </v-list>
+            </v-menu>
+
+            <v-divider v-if="niftiSeriesList.length > 0" />
+
             <v-list-item @click="browserSupportOpen = true">
               <template v-slot:prepend>
                 <v-icon icon="mdi-web" size="small" />
@@ -769,6 +794,19 @@ const mrRegPercent = computed(() => {
   if (!p || p.nLevels <= 0) return 0;
   return Math.min(100, (p.level / p.nLevels) * 100);
 });
+
+// NIfTI raw byte view (Persona 2 / orientation 検証用)
+const niftiSeriesList = computed<Array<{ idx: number; description: string }>>(() => {
+  const r = dicomViewRef.value;
+  if (!r?.getNiftiSeriesList) return [];
+  // getNiftiSeriesList は seriesList 直読みなので、reactive 連動のため
+  // seriesSummariesPublic にアクセスして reactivity を確保
+  void r.seriesSummariesPublic;
+  return r.getNiftiSeriesList();
+});
+const onInspectNiftiRaw = (idx: number) => {
+  dicomViewRef.value?.inspectNiftiRaw?.(idx);
+};
 </script>
 
 <style scoped>

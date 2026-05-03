@@ -2122,6 +2122,97 @@ const loadFile = async (file: File) => {
   loadFiles([file]);
 };
 
+// NIfTI raw byte view: 元シリーズの voxel array をそのまま使い、affine を unit vector
+// に置換した synthetic Volume を新シリーズとして seriesList に追加する。
+// innermost dim → screen X (左→右)、middle → screen Y (上→下)、outermost → paging。
+// modality / SUV factor も無視 (raw counts そのまま)。
+// WC/WW は voxel min/max を簡易サンプリング (10000 step) で推定。
+// Persona 2 (NIfTI orientation 検証) 用。
+const inspectNiftiRaw = async (sourceSeriesIdx: number) => {
+  if (sourceSeriesIdx < 0 || sourceSeriesIdx >= seriesList.length) return;
+  const src = seriesList[sourceSeriesIdx];
+  if (!src.volume) {
+    alert('Source series has no volume data.');
+    return;
+  }
+  const v = src.volume;
+  // voxel min/max sampling (大きい volume で全 scan するとフリーズするので step sampling)
+  let mn = Infinity, mx = -Infinity;
+  const step = Math.max(1, Math.floor(v.voxel.length / 100000));
+  for (let i = 0; i < v.voxel.length; i += step) {
+    const x = v.voxel[i];
+    if (x < mn) mn = x;
+    if (x > mx) mx = x;
+  }
+  if (!Number.isFinite(mn) || !Number.isFinite(mx)) { mn = 0; mx = 1; }
+  const wc = (mn + mx) / 2;
+  const ww = Math.max(1e-6, mx - mn);
+
+  const newIdx = seriesList.length;
+  const baseDesc = v.metadata?.seriesDescription ?? `Series ${sourceSeriesIdx}`;
+  seriesList.push({
+    myDicom: null,
+    volume: {
+      nx: v.nx,
+      ny: v.ny,
+      nz: v.nz,
+      // 物理座標を正規 unit vector に置換 → 「ファイル byte 順」が画面と完全一致
+      imagePosition: new THREE.Vector3(0, 0, 0),
+      vectorX: new THREE.Vector3(1, 0, 0),
+      vectorY: new THREE.Vector3(0, 1, 0),
+      vectorZ: new THREE.Vector3(0, 0, 1),
+      voxel: v.voxel,  // 同じ Float32Array を共有 (read-only 用途)
+      metadata: {
+        modality: 'OTHER',  // raw 表示なので modality 概念を持たせない
+        seriesUID: `raw-${newIdx}-${Date.now()}`,
+        seriesDescription: `RAW: ${baseDesc}`,
+      },
+    },
+  });
+  rebuildSeriesSummaries();
+
+  // 末尾に新 box を追加して raw view を表示
+  const newBoxId = tileN.value ?? 1;
+  const center = new THREE.Vector3(v.nx / 2, v.ny / 2, v.nz / 2);
+  const newInfo = {
+    clut: 0,
+    myWC: wc,
+    myWW: ww,
+    description: `RAW: ${baseDesc}`,
+    currentSeriesNumber: newIdx,
+    centerInWorld: center,
+    vecx: new THREE.Vector3(1, 0, 0),
+    vecy: new THREE.Vector3(0, 1, 0),
+    vecz: new THREE.Vector3(0, 0, 1),
+    isMip: false,
+    mip: null,
+  } as VolumeImageBoxInfo;
+  if (newBoxId >= imageBoxInfos.value.length) {
+    imageBoxInfos.value.push(newInfo);
+  } else {
+    imageBoxInfos.value[newBoxId] = newInfo;
+  }
+  while (boxOverlayDisabled.value.length <= newBoxId) boxOverlayDisabled.value.push(false);
+  while (boxSyncEnabled.value.length <= newBoxId) boxSyncEnabled.value.push(true);
+  tileN.value = newBoxId + 1;
+  await nextTick();
+  if (imb.value && imb.value[newBoxId]) imb.value[newBoxId].init();
+  showImage(newBoxId);
+};
+
+// NIfTI series 一覧 (☰ メニュー → Inspect NIfTI raw bytes 用)。
+// myDicom が null かつ volume を持つもの。
+const getNiftiSeriesList = (): { idx: number; description: string }[] => {
+  const out: { idx: number; description: string }[] = [];
+  for (let i = 0; i < seriesList.length; i++) {
+    const s = seriesList[i];
+    if (s.myDicom == null && s.volume) {
+      out.push({ idx: i, description: s.volume.metadata?.seriesDescription ?? `Series ${i}` });
+    }
+  }
+  return out;
+};
+
 // JPEG Lossless 圧縮されている全フレームを WASM (dcmjs-codecs) で復号する。
 // WASM は main thread で sync 実行され純 JS 比 5-20x 速いため Web Worker は不要。
 // frame ごとに setTimeout(0) で event loop に譲り UI 応答性を保つ。
@@ -3830,6 +3921,9 @@ provide('getSliceCount', (seriesIdx: number): number => {
 
 defineExpose({
   setupPetStandardView,
+  // NIfTI raw byte view (Persona 2 デバッグ用)
+  inspectNiftiRaw,
+  getNiftiSeriesList,
   // PET Standard ピッカー UI 用 (App.vue):
   //   getPetCtSeriesCandidates() — PT/CT 各候補一覧 (idx, label, isActive)
   //   resolvePetCtIndices()      — active → first-found 解決済み index

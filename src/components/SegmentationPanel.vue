@@ -415,6 +415,81 @@ const onExportHistogramCsv = () => {
     triggerDownload(blob, `${sid}_histograms_${ts}.csv`);
 };
 
+// Radiomics features (first-order + shape + GLCM + GLRLM) を全ラベル分計算して CSV 出力。
+// テクスチャ計算は重いので button label を「…」にして UI ブロック感を出す。
+// 巨大 VOI (10万 voxel 超) の場合 1-2 秒かかる可能性あり。
+const radiomicsRunning = ref(false);
+const onExportRadiomicsCsv = async () => {
+    const pet = store.petVolumeRef;
+    const mask = store.finalMask;
+    if (!pet || !mask) return;
+    radiomicsRunning.value = true;
+    try {
+        // 動的 import で radiomics モジュールを実行時のみロード (初回起動の bundle 軽量化)
+        const { computeAllRadiomics } = await import('./segmentation/radiomics');
+        // setTimeout で UI を 1 frame 進めて spinner 表示を確実にする
+        await new Promise(r => setTimeout(r, 30));
+        const grid = {
+            nx: pet.nx, ny: pet.ny, nz: pet.nz,
+            voxel: pet.voxel,
+            spacingMm: [
+                pet.vectorX.length(),
+                pet.vectorY.length(),
+                pet.vectorZ.length(),
+            ] as [number, number, number],
+        };
+        const rows = computeAllRadiomics(grid, mask, store.labels);
+        if (rows.length === 0) {
+            alert('No labeled voxels found — paint or apply threshold first.');
+            return;
+        }
+        // CSV: 1 行 = 1 ラベル × 全 features
+        const headers = [
+            'label_id', 'label_name', 'voxel_count', 'volume_cc',
+            // first-order
+            'min', 'max', 'mean', 'std', 'median',
+            'p10', 'p25', 'p75', 'p90',
+            'skewness', 'kurtosis', 'energy', 'rms',
+            'range', 'iqr', 'entropy', 'uniformity',
+            // shape
+            'surface_area_mm2', 'sphericity', 'compactness', 'surface_volume_ratio',
+            // texture (GLCM)
+            'glcm_contrast', 'glcm_homogeneity', 'glcm_energy', 'glcm_correlation',
+            // texture (GLRLM)
+            'glrlm_sre', 'glrlm_lre', 'glrlm_gln', 'glrlm_rln',
+        ];
+        const lines = [headers.join(',')];
+        const fmt = (x: number) => Number.isFinite(x) ? x.toFixed(6) : '';
+        for (const r of rows) {
+            const f = r.features;
+            lines.push([
+                String(r.labelId),
+                `"${r.labelName.replace(/"/g, '""')}"`,
+                String(f.voxelCount),
+                fmt(f.volumeCc),
+                fmt(f.min), fmt(f.max), fmt(f.mean), fmt(f.std), fmt(f.median),
+                fmt(f.p10), fmt(f.p25), fmt(f.p75), fmt(f.p90),
+                fmt(f.skewness), fmt(f.kurtosis), fmt(f.energy), fmt(f.rms),
+                fmt(f.range), fmt(f.iqr), fmt(f.entropy), fmt(f.uniformity),
+                fmt(f.surfaceAreaMm2), fmt(f.sphericity), fmt(f.compactness), fmt(f.surfaceVolumeRatio),
+                fmt(f.glcmContrast), fmt(f.glcmHomogeneity), fmt(f.glcmEnergy), fmt(f.glcmCorrelation),
+                fmt(f.glrlmSre), fmt(f.glrlmLre), fmt(f.glrlmGln), fmt(f.glrlmRln),
+            ].join(','));
+        }
+        const csv = '﻿' + lines.join('\n');
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+        const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+        const sid = store.petVolumeRef?.metadata?.seriesUID
+            ? store.petVolumeRef.metadata.seriesUID.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 32)
+            : 'radiomics';
+        triggerDownload(blob, `${sid}_radiomics_${ts}.csv`);
+    } catch (err: any) {
+        alert(`Radiomics computation failed: ${err?.message ?? err}`);
+    } finally {
+        radiomicsRunning.value = false;
+    }
+};
+
 // TLG / MTV は値の幅が大きいので桁数に応じて表示を切替
 const fmtTlg = (v: number): string => {
     if (!Number.isFinite(v)) return '';
@@ -800,7 +875,16 @@ const polygonModeProxy = computed({
                         @click="onExportHistogramCsv"
                         title="Export histograms for all labels (CSV)"
                     >
-                        <v-icon icon="mdi-download" size="x-small" class="mr-1" />CSV
+                        <v-icon icon="mdi-download" size="x-small" class="mr-1" />Hist
+                    </v-btn>
+                    <v-btn
+                        size="x-small" variant="text" density="compact"
+                        :disabled="!store.finalMask || store.labels.length === 0 || radiomicsRunning"
+                        @click="onExportRadiomicsCsv"
+                        title="Export radiomics features (first-order + shape + GLCM + GLRLM) for all labels"
+                    >
+                        <v-icon icon="mdi-atom" size="x-small" class="mr-1" />
+                        {{ radiomicsRunning ? '…' : 'Radiomics' }}
                     </v-btn>
                 </div>
 
