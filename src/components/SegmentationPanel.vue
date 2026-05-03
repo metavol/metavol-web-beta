@@ -249,9 +249,110 @@ const onSave = () => {
 };
 
 const loadFileInput = ref<HTMLInputElement | null>(null);
+const loadSnapshotInput = ref<HTMLInputElement | null>(null);
 
 const onLoadMaskClick = () => {
     loadFileInput.value?.click();
+};
+const onLoadSnapshotClick = () => {
+    loadSnapshotInput.value?.click();
+};
+
+// .mvs snapshot save/load
+const snapshotBusy = ref(false);
+const onSaveSnapshot = async () => {
+    const pet = store.petVolumeRef;
+    const mask = store.finalMask;
+    if (!pet || !mask) {
+        alert('No PT volume or mask to save.');
+        return;
+    }
+    snapshotBusy.value = true;
+    try {
+        const { buildSnapshotZip } = await import('./segmentation/snapshot');
+        // Box state は親 (DicomView) しか持っていないので、emit で取得依頼
+        // ここでは現状空配列で保存。将来 DicomView 経由で boxState を埋める
+        const blob = await buildSnapshotZip({
+            pet,
+            mask,
+            labels: store.labels,
+            threshold: store.threshold,
+            thresholdUnit: store.thresholdUnit,
+            thresholdMethod: store.thresholdMethod,
+            thresholdPct: store.thresholdPct,
+            referenceSpheres: store.referenceSpheres,
+            boxState: [],   // TODO: DicomView から imageBoxInfos のシリアライズを受け取る
+            tileN: 0,
+            activeTracerId: store.activeTracerId,
+        });
+        const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+        const sid = pet.metadata?.seriesUID
+            ? pet.metadata.seriesUID.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 32)
+            : 'snapshot';
+        triggerDownload(blob, `${sid}_${ts}.mvs`);
+    } catch (err: any) {
+        alert(`Failed to save snapshot: ${err?.message ?? err}`);
+    } finally {
+        snapshotBusy.value = false;
+    }
+};
+
+const onLoadSnapshotFile = async (e: Event) => {
+    const input = e.target as HTMLInputElement;
+    const f = input.files?.[0];
+    input.value = '';
+    if (!f) return;
+    if (!store.hasPet) {
+        alert('Load a PT volume first, then load the snapshot.');
+        return;
+    }
+    snapshotBusy.value = true;
+    try {
+        const { parseSnapshotZip, extractMaskFromSnapshot } = await import('./segmentation/snapshot');
+        const payload = await parseSnapshotZip(f);
+        if (!payload) throw new Error('Empty snapshot.');
+        const currentUid = store.petVolumeRef?.metadata?.seriesUID;
+        const snapUid = payload.manifest.petSeriesUID;
+        if (snapUid && currentUid && snapUid !== currentUid) {
+            const ok = window.confirm(
+                `This snapshot was created for PT series:\n  ${payload.manifest.petSeriesDescription ?? snapUid}\n\n` +
+                `but the currently active PT is:\n  ${store.petVolumeRef?.metadata?.seriesDescription ?? currentUid}\n\n` +
+                `Geometry may match by coincidence; mask may not align anatomically. Load anyway?`
+            );
+            if (!ok) return;
+        }
+        const { mask, dims } = extractMaskFromSnapshot(payload);
+        const sidecar = payload.sidecar ?? {};
+        const res = store.loadMaskFromNifti(mask, dims, sidecar);
+        if (!res.ok) {
+            alert(res.reason);
+            return;
+        }
+        // Threshold method / pct / reference spheres も復元
+        if (sidecar.thresholdMethod) store.thresholdMethod = sidecar.thresholdMethod;
+        if (typeof sidecar.thresholdPct === 'number') store.thresholdPct = sidecar.thresholdPct;
+        const refs = payload.referenceSpheres;
+        if (refs?.liver) {
+            store.setReferenceSphere('liver',
+                new THREE.Vector3(refs.liver.centerWorld[0], refs.liver.centerWorld[1], refs.liver.centerWorld[2]),
+                refs.liver.radiusMm,
+                { suvMean: refs.liver.suvMean, suvStd: refs.liver.suvStd, voxelCount: refs.liver.voxelCount },
+            );
+        }
+        if (refs?.bloodPool) {
+            store.setReferenceSphere('bloodPool',
+                new THREE.Vector3(refs.bloodPool.centerWorld[0], refs.bloodPool.centerWorld[1], refs.bloodPool.centerWorld[2]),
+                refs.bloodPool.radiusMm,
+                { suvMean: refs.bloodPool.suvMean, suvStd: refs.bloodPool.suvStd, voxelCount: refs.bloodPool.voxelCount },
+            );
+        }
+        if (payload.activeTracerId) store.activeTracerId = payload.activeTracerId;
+        emit('redraw');
+    } catch (err: any) {
+        alert(`Failed to load snapshot: ${err?.message ?? err}`);
+    } finally {
+        snapshotBusy.value = false;
+    }
 };
 
 const readFileAsArrayBuffer = (f: File): Promise<ArrayBuffer> =>
@@ -1246,6 +1347,22 @@ const polygonModeProxy = computed({
                     </v-btn>
                     <v-btn size="small" variant="outlined" @click="onClearManual">Clear edits</v-btn>
                 </div>
+                <div class="mv-btn-row mt-1">
+                    <v-btn
+                        size="small"
+                        variant="tonal"
+                        color="primary"
+                        :disabled="!store.finalMask || snapshotBusy"
+                        @click="onSaveSnapshot"
+                        title="Download .mvs snapshot (mask + labels + thresholds + box layout)"
+                    >
+                        <v-icon icon="mdi-download" size="small" class="mr-1" />
+                        {{ snapshotBusy ? '…' : 'Save snapshot (.mvs)' }}
+                    </v-btn>
+                    <v-btn size="small" variant="text" @click="onLoadSnapshotClick">
+                        <v-icon icon="mdi-upload" size="small" class="mr-1" />Load .mvs
+                    </v-btn>
+                </div>
                 <input
                     ref="loadFileInput"
                     type="file"
@@ -1253,6 +1370,13 @@ const polygonModeProxy = computed({
                     multiple
                     style="display: none"
                     @change="onLoadMaskFiles"
+                />
+                <input
+                    ref="loadSnapshotInput"
+                    type="file"
+                    accept=".mvs,.zip"
+                    style="display: none"
+                    @change="onLoadSnapshotFile"
                 />
             </section>
         </template>
