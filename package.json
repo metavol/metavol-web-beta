@@ -14,6 +14,7 @@
     "dicom-parser": "^1.8.21",
     "jpeg-lossless-decoder-js": "^2.1.2",
     "nifti-reader-js": "^0.6.8",
+    "onnxruntime-web": "^1.25.1",
     "pinia": "^3.0.4",
     "roboto-fontface": "*",
     "three": "^0.164.1",

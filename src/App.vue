@@ -566,6 +566,7 @@ const tools = [
   { value: 'page',       icon: 'mdi-arrow-up-down',         label: 'Page' },
   { value: 'sphereROI',  icon: 'mdi-circle-outline',        label: 'Sphere ROI' },
   { value: 'polygonROI', icon: 'mdi-pentagon-outline',      label: 'Polygon ROI' },
+  { value: 'aiRoi',      icon: 'mdi-auto-fix',              label: 'AI ROI (LiteMedSAM, WebGPU)' },
   { value: 'assignLabel',icon: 'mdi-tag-outline',           label: 'Assign Label' },
 ];
 

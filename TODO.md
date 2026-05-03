@@ -183,6 +183,28 @@ UI 案: NIfTI series card のメニュー or ☰ から "Inspect NIfTI bytes" �
 6. 既存 blend slider (overlayAlpha) を流用: Fusion VR でも base/overlay 比を制御
 7. リスク: PT (低解像) と CT (高解像) で sample 数が大きく異なる → ray step は CT 解像度基準で OK
 
+### LiteMedSAM AI ROI (browser ONNX, Phase 2 で本番化)
+
+Phase 1 完了 (commit 待ち、本セッションで scaffolding):
+- `onnxruntime-web` 1.25.1 を追加
+- `src/components/segmentation/medSam.ts` 新規 (encoder/decoder 分離 inference + preprocess + WebGPU detect)
+- App-bar に AI ROI ツールボタン (`mdi-auto-fix`, value='aiRoi') 追加
+- DicomView の `imageBoxClicked` に aiRoi 分岐 + `handleAiRoiClick` 実装 (動的 import + WebGPU detect + lazy model load + alert with timing log)
+- ImageBox.vue が `cv1` を defineExpose (canvas pixel 取得用)
+
+Phase 2 残タスク:
+- LiteMedSAM ONNX 取得: 公式 [bowang-lab/MedSAM](https://github.com/bowang-lab/MedSAM) `onnx_decoder_exporter.py` で encoder + decoder を別ファイル化、または CVPR 2024 challenge submission ([NeuroDesk](https://github.com/NeuroDesk/cvpr-sam-on-laptop-2024) / [automl](https://github.com/automl/CVPR24-MedSAM-on-Laptop)) から pre-converted ONNX を取得
+- 配置: `public/medsam/litemedsam_encoder.onnx` + `public/medsam/litemedsam_decoder.onnx` (Git LFS or external CDN host 推奨、~50MB total)
+- 推論結果 (256×256 binary mask) の **PET grid 投影**: 既存 polygon ROI の `screenToWorld → worldToVoxel_(petIdx)` パターンを流用して `segStore.manualEdits` に書込み
+- FG/BG click 連続編集 UI: 1 click 目で encoder forward、2 click 目以降は decoder のみ (cached embedding 使い回し → 高速 refine)
+- Multi-slice propagation: SAM2 互換にする場合は別モデル必要 (Phase 3)
+- WASM fallback: WebGPU 非対応環境向け (Phase 4、要望あれば)
+
+参考論文・challenge:
+- [Swin-LiteMedSAM (arxiv 2024)](https://arxiv.org/abs/2409.07172) — 軽量化バリエーション
+- [MCP-MedSAM (MELBA 2025)](https://www.melba-journal.org/papers/2025:008.html) — 1日 GPU で訓練可能な軽量版
+- [Efficient QAT MedSAM (arxiv 2024)](https://arxiv.org/html/2412.11186) — int8 量子化 (~10MB へさらに削減)
+
 ### Dosimetry (single-timepoint simplified, 次セッション)
 ユーザ確認済: single-timepoint approximation (6-10h)。
 

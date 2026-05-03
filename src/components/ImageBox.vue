@@ -897,7 +897,9 @@ const drawPolygonOverlay = (vertices: Array<[number, number]>, mode: 'add' | 'er
 
 defineExpose({init, show, show2, showRgb, showDirect,
    drawNiftiSlice, drawNiftiSliceFusion, drawNiftiMip, drawNiftiVR, clear,
-   drawSphereOverlay, drawPolygonOverlay});
+   drawSphereOverlay, drawPolygonOverlay,
+   // AI ROI (LiteMedSAM) は box の canvas pixel を読む必要がある
+   cv1});
 
 </script>
 

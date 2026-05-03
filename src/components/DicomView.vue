@@ -1730,8 +1730,60 @@ const imageBoxClicked = (e:MouseEvent) => {
     handlePolygonClick(e);
   } else if (leftButtonFunction.value === "assignLabel") {
     handleAssignLabelClick(e);
+  } else if (leftButtonFunction.value === "aiRoi") {
+    handleAiRoiClick(e);
   }
 }
+
+// LiteMedSAM (browser ONNX, WebGPU) で click 周辺の lesion を auto segment。
+// Phase 1: WebGPU detect + skeleton call。Phase 2 で実 ONNX 接続後 active 化。
+let medSamBusy = false;
+const handleAiRoiClick = async (e: MouseEvent) => {
+  if (medSamBusy) return;
+  const id = getIdOfEventOccured(e);
+  if (!isVolumeImageBoxInfo(id)) {
+    alert('AI ROI works only on Volume / Fusion boxes (with PET as the active series).');
+    return;
+  }
+  if (!segStore.petVolumeRef) {
+    alert('AI ROI requires a PT volume to be loaded.');
+    return;
+  }
+  // Lazy import to keep main bundle slim
+  const ms = await import('./segmentation/medSam');
+  if (!ms.isWebGpuAvailable()) {
+    alert(
+      'AI ROI requires WebGPU support.\n\n' +
+      'Use Chrome 113+, Edge, or Safari 17.4+ on a system with a compatible GPU.\n' +
+      'Firefox stable does not yet support WebGPU.'
+    );
+    return;
+  }
+
+  const [cx, cy] = getCanvasXY(e);
+  const canvas = imb.value?.[id]?.cv1.value as HTMLCanvasElement | undefined;
+  if (!canvas) return;
+
+  medSamBusy = true;
+  try {
+    const t0 = performance.now();
+    const mask2d = await ms.segmentSingleClick(canvas, cx, cy);
+    const t1 = performance.now();
+    if (!mask2d) {
+      console.warn('[aiRoi] no mask returned');
+      return;
+    }
+    // mask2d は canvas size の binary。PET grid に投影して manualEdits に書き込み (Phase 2 で polygon と同じ転写ロジックを共有)
+    console.log(`[aiRoi] click (${cx.toFixed(0)}, ${cy.toFixed(0)}) → mask in ${(t1 - t0).toFixed(0)}ms`);
+    // TODO: Phase 2 で screen→world→PET voxel 投影 + segStore.manualEdits 書込み + show()
+    alert(`Phase 1 (skeleton) — model not yet wired.\nGot ${mask2d.length} mask pixels in ${(t1 - t0).toFixed(0)}ms.`);
+  } catch (err: any) {
+    console.error('[aiRoi]', err);
+    alert(`AI ROI failed: ${err?.message ?? err}`);
+  } finally {
+    medSamBusy = false;
+  }
+};
 
 const handleAssignLabelClick = (e: MouseEvent) => {
   const id = getIdOfEventOccured(e);
