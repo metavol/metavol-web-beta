@@ -160,9 +160,48 @@ UI 案: NIfTI series card のメニュー or ☰ から "Inspect NIfTI bytes" �
 
 ### Fusion MIP / Volume Rendering (次セッション着手予定)
 - 現状 PET Standard の MIP は PT 単独。Fusion MIP (CT 上に PT MIP overlay) は未実装
-- VR 経路 (`drawNiftiVR`) は単一レイヤのみ。Fusion VR を考えると base/overlay 両方のサンプリングが必要
-- 設計検討: 1) Per-ray composite (CT base 自体は 2D slice、PT を rendered としてオーバレイ); 2) 真の volume composite (両者を 3D として ray-cast、blend)
-- Persona 1/3 双方で「PET の集積を全体俯瞰しつつ CT の構造と紐付けたい」需要あり
+- VR 経路 (`drawNiftiVR`) は単一レイヤのみ
+- ユーザ確認済: **Plan B** (true volume composite ray-cast) を採用予定 (10-15h)
+
+#### 詳細設計 (Plan B)
+1. 新関数 `drawNiftiSliceFusionVR(ct..., pt..., angle, alpha)` を `ImageBox.vue` に追加
+2. ロジック (drawNiftiVR を base に拡張):
+   ```
+   for each canvas pixel (i, j):
+     for ray step t = 0..N:
+       world point P = origin + t * dir
+       sample CT at worldToVoxel_(P, ctIdx) → ctValue, ctAlpha=transferFn(ctValue)
+       sample PT at worldToVoxel_(P, ptIdx) → ptValue, ptAlpha=transferFn(ptValue)
+       blendedColor = ctClut(ctValue) * (1-alpha) + ptClut(ptValue) * alpha
+       blendedAlpha = max(ctAlpha, ptAlpha)
+       composite front-to-back into accum
+       early exit if accumAlpha > 0.99
+   ```
+3. UI: Fusion box の plane menu に "VR" 追加 (現状 mip / smip / vr は Volume box only)
+4. `FusedVolumeImageBoxInfo.isVr: boolean` 追加 + showImage 分岐
+5. パフォーマンス: WASM SIMD 化検討。ピュア JS で 64×64×64 = 200ms 想定。512^3 だと数秒 → fast mode (stride=2) と組合せ
+6. 既存 blend slider (overlayAlpha) を流用: Fusion VR でも base/overlay 比を制御
+7. リスク: PT (低解像) と CT (高解像) で sample 数が大きく異なる → ray step は CT 解像度基準で OK
+
+### Dosimetry (single-timepoint simplified, 次セッション)
+ユーザ確認済: single-timepoint approximation (6-10h)。
+
+#### 設計
+- 1 時相 SPECT/PET をロード → organ ROI 内 activity を測定
+- 仮定: tracer half-life で物理崩壊、生物学的半減期は organ-specific table から
+- 累積活性 Ã (Bq·s) = A0 × τ_eff、τ_eff = T_half_eff / ln(2)
+  - T_half_eff = (T_half_phys × T_half_bio) / (T_half_phys + T_half_bio)
+- 線量 D (Gy) = Ã × S-value (Gy/Bq·s)
+- S-value table を bundled JSON に持つ (organ × source / target、tracer dependent)
+  - 主要なのは Lu-177, Y-90, I-131 (theranostics)
+
+#### 必要な新規モジュール
+- `src/components/dosimetry/sValueTables.ts` — organ × source/target × tracer の S-value JSON
+- `src/components/dosimetry/biologicalHalfLife.ts` — organ-specific T_bio table
+- `src/components/dosimetry/activityToDose.ts` — D = Ã × S 計算
+- UI: Inspector に新セクション "Dosimetry" — organ ROI list + 計算結果
+- 出力: organ 別 Gy/MBq テーブルの CSV export
+- 実装コスト: 6-10h、データ table 整備が半分
 
 ### Manual ROI 編集の細かい不具合 (詳細未確認、まとめて見直す)
 - polygon が 1 スライスズレるケース (CLAUDE.md 既知バグ #1 関連、修正済? 要確認)
