@@ -131,8 +131,71 @@ const currentLabelColorCss = computed(() => {
 const HIST_VB_W = 220;
 const HIST_VB_H = 60;
 
+// Threshold method 選択肢 (UI label と内部 id 対応)
+const thresholdMethodItems = [
+    { title: 'Fixed SUV (preset / manual)',          value: 'fixed' },
+    { title: '% of VOI / volume SUVmax',             value: 'pctMax' },
+    { title: 'PERCIST (1.5×liver + 2σ)',             value: 'liverPercist' },
+    { title: '% of liver SUVmean',                   value: 'liverPct' },
+];
+// liver reference sphere が必要な method か
+const needsLiverReference = computed(() =>
+    store.thresholdMethod === 'liverPercist' || store.thresholdMethod === 'liverPct'
+);
+// Deauville score 表示有無 = liver/blood pool reference のいずれかが set 済 OR liver method
+const showRefSpheres = computed(() =>
+    needsLiverReference.value || !!store.referenceSpheres.liver || !!store.referenceSpheres.bloodPool
+);
+// Deauville 5-point scale: tumor SUVmax と liver / blood pool の比から推定
+//   1 = no uptake, 2 = ≤ blood pool, 3 = > blood pool but ≤ liver,
+//   4 = moderately > liver, 5 = markedly > liver (>2× liver) or new lesion
+const deauvilleScore = (lesionSuvMax: number): { score: number; label: string } | null => {
+    const liver = store.referenceSpheres.liver?.suvMean;
+    const bp = store.referenceSpheres.bloodPool?.suvMean;
+    if (liver == null || bp == null) return null;
+    if (lesionSuvMax <= 0.1) return { score: 1, label: '1: no uptake' };
+    if (lesionSuvMax <= bp) return { score: 2, label: '2: ≤ blood pool' };
+    if (lesionSuvMax <= liver) return { score: 3, label: '3: > blood pool, ≤ liver' };
+    if (lesionSuvMax <= 2 * liver) return { score: 4, label: '4: moderately > liver' };
+    return { score: 5, label: '5: markedly > liver' };
+};
+
+// 全 lesion の Deauville 集計 (footer 表示用)
+const deauvilleSummary = computed(() => {
+    const rows = lesionRows.value;
+    if (rows.length === 0) return null;
+    const liver = store.referenceSpheres.liver?.suvMean;
+    const bp = store.referenceSpheres.bloodPool?.suvMean;
+    if (liver == null || bp == null) return null;
+    const counts = [0, 0, 0, 0, 0, 0];  // [_, 1, 2, 3, 4, 5]
+    let highest = 1;
+    let highestLabel = 'no uptake';
+    for (const r of rows) {
+        const ds = deauvilleScore(r.suvMax);
+        if (!ds) continue;
+        counts[ds.score]++;
+        if (ds.score > highest) { highest = ds.score; highestLabel = ds.label.replace(/^\d+: /, ''); }
+    }
+    const distribution = `1=${counts[1]} 2=${counts[2]} 3=${counts[3]} 4=${counts[4]} 5=${counts[5]}`;
+    return { highest, label: highestLabel, distribution };
+});
+// resolveEffectiveThreshold の current 値 (UI hint 表示用)
+const resolvedThresholdHint = computed<string | null>(() => {
+    void store.maskVersion; void store.referenceSpheres.liver?.suvMean;
+    const r = store.resolveEffectiveThreshold();
+    return r ? r.rationale : null;
+});
+const canApplyThreshold = computed<boolean>(() => {
+    return store.resolveEffectiveThreshold() != null;
+});
+
 const onApplyThreshold = () => {
-    store.applyThreshold(store.threshold);
+    const r = store.resolveEffectiveThreshold();
+    if (!r) {
+        alert('Cannot resolve effective threshold. For PERCIST/liver methods, place the liver reference sphere first.');
+        return;
+    }
+    store.applyThreshold(r.value);
     store.findIslands();
     emit('redraw');
 };
@@ -519,6 +582,24 @@ const lesionTotals = computed(() => {
     return { count: rows.length, totalMtv, totalTlg, totalVox, maxSuv };
 });
 
+// 現 active tracer preset の TMTV cutoff DB を返し、totalMtv が cutoff を超えたかを判定。
+// Tracer 未選択 / cutoff 未定義 → null。
+import { tracerById as _tracerById } from './tracerPresets';
+const tmtvCutoffStatus = computed(() => {
+    const totals = lesionTotals.value;
+    if (!totals) return null;
+    const tid = store.activeTracerId;
+    if (!tid) return null;
+    const preset = _tracerById(tid);
+    if (!preset?.tmtvCutoffs || preset.tmtvCutoffs.length === 0) return null;
+    return preset.tmtvCutoffs.map(c => ({
+        ...c,
+        crossed: c.direction === 'above'
+            ? totals.totalMtv > c.valueCc
+            : totals.totalMtv < c.valueCc,
+    }));
+});
+
 // SUV 警告: PET volume の metadata に suvOk=false が立っているとき、
 // 失敗理由を Inspector の上部に黄色バナーで通知する。
 // suvFactor=1 (= raw 値表示) で fall-through していることを user に明示することが目的。
@@ -696,16 +777,31 @@ const polygonModeProxy = computed({
                     <v-icon icon="mdi-tune-variant" size="x-small" />
                     Threshold ({{ store.thresholdUnit }})
                 </div>
+
+                <!-- Threshold method selector (PERCIST/Deauville サポート) -->
                 <v-select
+                    :model-value="store.thresholdMethod"
+                    @update:model-value="(v: any) => store.thresholdMethod = v"
+                    :items="thresholdMethodItems"
+                    density="compact"
+                    hide-details
+                    variant="outlined"
+                    label="Method"
+                />
+
+                <!-- Method 別の追加 input -->
+                <v-select
+                    v-if="store.thresholdMethod === 'fixed'"
                     :model-value="thresholdSelection"
                     @update:model-value="onThresholdSelectionChange($event)"
                     :items="THRESHOLD_PRESETS"
                     density="compact"
                     hide-details
                     variant="outlined"
+                    class="mt-1"
                 />
                 <v-text-field
-                    v-if="thresholdSelection === 'manual'"
+                    v-if="store.thresholdMethod === 'fixed' && thresholdSelection === 'manual'"
                     v-model.number="store.threshold"
                     type="number"
                     step="0.1"
@@ -715,8 +811,72 @@ const polygonModeProxy = computed({
                     label="SUV value"
                     class="mt-1"
                 />
+                <v-text-field
+                    v-if="store.thresholdMethod === 'pctMax' || store.thresholdMethod === 'liverPct'"
+                    :model-value="(store.thresholdPct * 100).toFixed(0)"
+                    @update:model-value="(v: string) => store.thresholdPct = Math.max(0.01, Math.min(2, Number(v) / 100))"
+                    type="number"
+                    step="1"
+                    density="compact"
+                    hide-details
+                    variant="outlined"
+                    :label="store.thresholdMethod === 'pctMax' ? '% of SUVmax' : '% of liver SUVmean'"
+                    suffix="%"
+                    class="mt-1"
+                />
+
+                <!-- Reference sphere placement (liver / bloodPool) — PERCIST / Deauville 用 -->
+                <div v-if="needsLiverReference || showRefSpheres" class="mv-ref-spheres mt-2">
+                    <div class="mv-ref-row">
+                        <v-icon
+                            :icon="store.referenceSpheres.liver ? 'mdi-check-circle' : 'mdi-circle-outline'"
+                            :color="store.referenceSpheres.liver ? 'primary' : undefined"
+                            size="x-small"
+                        />
+                        <span class="mv-ref-label">Liver</span>
+                        <span v-if="store.referenceSpheres.liver" class="mv-mono mv-ref-stats">
+                            {{ store.referenceSpheres.liver.suvMean.toFixed(2) }} ± {{ store.referenceSpheres.liver.suvStd.toFixed(2) }}
+                        </span>
+                        <v-btn
+                            size="x-small"
+                            :variant="store.referencePlacementMode === 'liver' ? 'flat' : 'tonal'"
+                            :color="store.referencePlacementMode === 'liver' ? 'primary' : undefined"
+                            @click="store.setReferencePlacementMode(store.referencePlacementMode === 'liver' ? null : 'liver')"
+                            class="ml-auto"
+                        >
+                            {{ store.referencePlacementMode === 'liver' ? 'Click on liver…' : 'Place' }}
+                        </v-btn>
+                    </div>
+                    <div class="mv-ref-row mt-1">
+                        <v-icon
+                            :icon="store.referenceSpheres.bloodPool ? 'mdi-check-circle' : 'mdi-circle-outline'"
+                            :color="store.referenceSpheres.bloodPool ? 'primary' : undefined"
+                            size="x-small"
+                        />
+                        <span class="mv-ref-label">Blood pool</span>
+                        <span v-if="store.referenceSpheres.bloodPool" class="mv-mono mv-ref-stats">
+                            {{ store.referenceSpheres.bloodPool.suvMean.toFixed(2) }} ± {{ store.referenceSpheres.bloodPool.suvStd.toFixed(2) }}
+                        </span>
+                        <v-btn
+                            size="x-small"
+                            :variant="store.referencePlacementMode === 'bloodPool' ? 'flat' : 'tonal'"
+                            :color="store.referencePlacementMode === 'bloodPool' ? 'primary' : undefined"
+                            @click="store.setReferencePlacementMode(store.referencePlacementMode === 'bloodPool' ? null : 'bloodPool')"
+                            class="ml-auto"
+                        >
+                            {{ store.referencePlacementMode === 'bloodPool' ? 'Click on aorta…' : 'Place' }}
+                        </v-btn>
+                    </div>
+                    <div v-if="store.referencePlacementMode" class="mv-hint mt-1" style="color: var(--mv-warning, #FFB454)">
+                        Use the Sphere ROI tool and click on the {{ store.referencePlacementMode === 'liver' ? 'right liver lobe' : 'descending aorta' }} (any Volume box).
+                    </div>
+                </div>
+                <div v-if="resolvedThresholdHint" class="mv-hint mt-1">
+                    → {{ resolvedThresholdHint }}
+                </div>
+
                 <div class="mv-btn-row mt-2">
-                    <v-btn size="small" color="primary" variant="flat" @click="onApplyThreshold">
+                    <v-btn size="small" color="primary" variant="flat" :disabled="!canApplyThreshold" @click="onApplyThreshold">
                         <v-icon icon="mdi-play" size="small" class="mr-1" />Apply
                     </v-btn>
                     <v-btn size="small" variant="outlined" @click="onClearThreshold">Clear</v-btn>
@@ -1035,6 +1195,42 @@ const polygonModeProxy = computed({
                                 </tr>
                             </tfoot>
                         </table>
+                    </div>
+
+                    <!-- Deauville score (liver + blood pool reference 両方ある時のみ) -->
+                    <div v-if="deauvilleSummary" class="mv-deauville mt-2">
+                        <v-icon icon="mdi-numeric" size="x-small" class="mr-1" />
+                        <span class="mv-deauville-label">Highest Deauville:</span>
+                        <span class="mv-mono mv-deauville-score" :class="`mv-deauville-${deauvilleSummary.highest}`">
+                            {{ deauvilleSummary.highest }} ({{ deauvilleSummary.label }})
+                        </span>
+                        <span class="mv-deauville-dist">
+                            Distribution: {{ deauvilleSummary.distribution }}
+                        </span>
+                    </div>
+
+                    <!-- TMTV prognostic cutoff (active tracer preset の文献値と比較) -->
+                    <div v-if="tmtvCutoffStatus" class="mv-tmtv-cutoffs">
+                        <div
+                            v-for="c in tmtvCutoffStatus"
+                            :key="c.label"
+                            class="mv-tmtv-cutoff-row"
+                            :class="{ 'is-crossed': c.crossed }"
+                            :title="`${c.sourceLabel}${c.sourceUrl ? ' — ' + c.sourceUrl : ''}`"
+                        >
+                            <v-icon
+                                :icon="c.crossed ? 'mdi-alert' : 'mdi-check-circle-outline'"
+                                size="x-small"
+                                class="mr-1"
+                            />
+                            <span class="mv-tmtv-cutoff-label">{{ c.label }}:</span>
+                            <span class="mv-mono mv-tmtv-cutoff-value">
+                                {{ c.direction === 'above' ? '>' : '<' }} {{ c.valueCc }} cc
+                            </span>
+                            <span class="mv-tmtv-cutoff-status">
+                                {{ c.crossed ? '⚠ crossed' : 'within' }}
+                            </span>
+                        </div>
                     </div>
                 </template>
             </section>
@@ -1408,6 +1604,95 @@ const polygonModeProxy = computed({
     overflow: auto;
     border: 1px solid var(--mv-border);
     border-radius: 3px;
+}
+
+/* TMTV prognostic cutoff badges (Total 行の下に並ぶ) */
+.mv-tmtv-cutoffs {
+    margin-top: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.mv-tmtv-cutoff-row {
+    display: flex;
+    align-items: center;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 2px;
+    border: 1px solid var(--mv-border-strong, #3a4a55);
+    color: var(--mv-text-dim);
+    cursor: help;
+}
+.mv-tmtv-cutoff-row.is-crossed {
+    color: var(--mv-warning, #FFB454);
+    border-color: var(--mv-warning, #FFB454);
+    background: rgba(255, 180, 84, 0.08);
+}
+.mv-tmtv-cutoff-label {
+    flex: 1;
+    color: var(--mv-text);
+    margin-right: 4px;
+}
+.mv-tmtv-cutoff-value {
+    margin-right: 6px;
+}
+.mv-tmtv-cutoff-status {
+    font-weight: 600;
+}
+
+/* Reference sphere placement (PERCIST/Deauville) */
+.mv-ref-spheres {
+    border: 1px solid var(--mv-border);
+    border-radius: 3px;
+    padding: 4px 6px;
+    background: var(--mv-surface-2, #1a232b);
+}
+.mv-ref-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+}
+.mv-ref-label {
+    font-weight: 600;
+    color: var(--mv-text);
+}
+.mv-ref-stats {
+    color: var(--mv-text-dim);
+    font-size: 10px;
+}
+
+/* Deauville score footer */
+.mv-deauville {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 11px;
+    padding: 4px 8px;
+    border-radius: 3px;
+    background: rgba(0, 212, 170, 0.06);
+    border-left: 2px solid var(--mv-accent, #00D4AA);
+}
+.mv-deauville-label {
+    color: var(--mv-text);
+    font-weight: 600;
+}
+.mv-deauville-score {
+    font-weight: 700;
+    padding: 0 6px;
+    border-radius: 2px;
+}
+.mv-deauville-1, .mv-deauville-2 { color: #4caf50; }    /* "negative" */
+.mv-deauville-3 { color: #FFB454; }                      /* indeterminate */
+.mv-deauville-4, .mv-deauville-5 {
+    color: #FF5C7A;                                       /* "positive" */
+}
+.mv-deauville-dist {
+    margin-left: auto;
+    color: var(--mv-text-dim);
+    font-size: 10px;
+    font-family: 'JetBrains Mono', 'Consolas', monospace;
 }
 table.mv-lesion-table {
     border-collapse: collapse;

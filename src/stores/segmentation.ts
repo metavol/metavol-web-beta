@@ -117,6 +117,24 @@ interface State {
     // PT 表示単位。'SUV' (既定、voxel そのまま) / 'BqMl' (voxel / suvFactor で表示)。
     // 内部 voxel は常に SUV (dicom2volume.ts で × suvFactor 済み)。toggle は legend / 入力値変換のみに影響。
     petDisplayUnit: 'SUV' | 'BqMl';
+
+    // Threshold method (PERCIST/Deauville サポート用)。'fixed' は従来の SUV/CNTS 直接指定。
+    //   - fixed       : threshold (SUV) 値そのまま
+    //   - pctMax      : threshold = thresholdPct × VOI 内 SUVmax
+    //   - liverPercist: threshold = 1.5 × liver SUVmean + 2 × liver SD (PERCIST 1.0)
+    //   - liverPct    : threshold = thresholdPct × liver SUVmean (free-form)
+    thresholdMethod: 'fixed' | 'pctMax' | 'liverPercist' | 'liverPct';
+    thresholdPct: number;  // 0..1 (pctMax / liverPct 用、例: 0.41 = 41%)
+
+    // Reference spheres for PERCIST/Deauville scoring
+    //   liver       : 通常 right liver lobe 内 3cm 球 (PERCIST: 1.5+2σ で background 推定)
+    //   bloodPool   : 通常 mediastinal blood pool / aorta 内 1cm 球 (Deauville: tumor vs blood pool)
+    referenceSpheres: {
+        liver: { centerWorld: THREE.Vector3; radiusMm: number; suvMean: number; suvStd: number; voxelCount: number } | null;
+        bloodPool: { centerWorld: THREE.Vector3; radiusMm: number; suvMean: number; suvStd: number; voxelCount: number } | null;
+    };
+    // Reference sphere 配置モード: 次クリックの sphere 配置先 ('liver' | 'bloodPool' | null=normal SphereROI)
+    referencePlacementMode: 'liver' | 'bloodPool' | null;
 }
 
 export const useSegmentationStore = defineStore('segmentation', {
@@ -174,6 +192,11 @@ export const useSegmentationStore = defineStore('segmentation', {
         activeTracerId: null,
 
         petDisplayUnit: 'SUV',
+
+        thresholdMethod: 'fixed',
+        thresholdPct: 0.41,   // PERCIST 派生 (typical 41% of SUVmax)
+        referenceSpheres: { liver: null, bloodPool: null },
+        referencePlacementMode: null,
     }),
 
     getters: {
@@ -282,6 +305,49 @@ export const useSegmentationStore = defineStore('segmentation', {
             this.invalidateComponentMap();
         },
 
+        // PERCIST/Deauville 派生の threshold method を解決して effective threshold (SUV) を返す。
+        // Caller は applyThreshold(value) に渡す前にこれを呼ぶ。
+        // 戻り値が null なら必要な reference sphere や VOI が無く計算不可。
+        resolveEffectiveThreshold(): { value: number; rationale: string } | null {
+            const m = this.thresholdMethod;
+            if (m === 'fixed') {
+                return { value: this.threshold, rationale: `Fixed SUV ${this.threshold.toFixed(2)}` };
+            }
+            if (m === 'pctMax') {
+                // VOI 内 SUVmax を取得 (sphere ROI または既存 mask から)
+                let suvMax = 0;
+                if (this.sphere) {
+                    suvMax = this.sphere.suvMax;
+                } else if (this.finalMask && this.petVolumeRef) {
+                    const pet = this.petVolumeRef.voxel;
+                    const m2 = this.finalMask;
+                    for (let i = 0; i < m2.length; i++) {
+                        if (m2[i] !== 0 && pet[i] > suvMax) suvMax = pet[i];
+                    }
+                } else if (this.petVolumeRef) {
+                    // VOI なし → volume 全体の max
+                    const pet = this.petVolumeRef.voxel;
+                    for (let i = 0; i < pet.length; i++) if (pet[i] > suvMax) suvMax = pet[i];
+                }
+                if (suvMax <= 0) return null;
+                const v = suvMax * this.thresholdPct;
+                return { value: v, rationale: `${(this.thresholdPct * 100).toFixed(0)}% of SUVmax (${suvMax.toFixed(2)}) = ${v.toFixed(2)}` };
+            }
+            if (m === 'liverPercist') {
+                const liver = this.referenceSpheres.liver;
+                if (!liver) return null;
+                const v = 1.5 * liver.suvMean + 2 * liver.suvStd;
+                return { value: v, rationale: `PERCIST: 1.5 × liver SUVmean (${liver.suvMean.toFixed(2)}) + 2 × σ (${liver.suvStd.toFixed(2)}) = ${v.toFixed(2)}` };
+            }
+            if (m === 'liverPct') {
+                const liver = this.referenceSpheres.liver;
+                if (!liver) return null;
+                const v = liver.suvMean * this.thresholdPct;
+                return { value: v, rationale: `${(this.thresholdPct * 100).toFixed(0)}% of liver SUVmean (${liver.suvMean.toFixed(2)}) = ${v.toFixed(2)}` };
+            }
+            return null;
+        },
+
         clearThresholdMask() {
             if (this.thresholdMask) this.thresholdMask.fill(0);
             this.recomputeFinalMask();
@@ -335,6 +401,24 @@ export const useSegmentationStore = defineStore('segmentation', {
 
         clearSphere() {
             this.sphere = null;
+        },
+
+        // Reference sphere (liver / bloodPool) を配置 + 内部 SUV stats 計算
+        setReferenceSphere(kind: 'liver' | 'bloodPool', centerWorld: THREE.Vector3, radiusMm: number, stats: { suvMean: number; suvStd: number; voxelCount: number }) {
+            this.referenceSpheres[kind] = {
+                centerWorld: centerWorld.clone(),
+                radiusMm,
+                suvMean: stats.suvMean,
+                suvStd: stats.suvStd,
+                voxelCount: stats.voxelCount,
+            };
+            this.referencePlacementMode = null;
+        },
+        clearReferenceSphere(kind: 'liver' | 'bloodPool') {
+            this.referenceSpheres[kind] = null;
+        },
+        setReferencePlacementMode(mode: 'liver' | 'bloodPool' | null) {
+            this.referencePlacementMode = mode;
         },
 
         bumpMaskVersion() {

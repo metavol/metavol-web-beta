@@ -16,6 +16,19 @@ export interface TracerLabelDef {
     name: string;
 }
 
+/** TMTV (Total Metabolic Tumor Volume) の prognostic cutoff
+ *  cancer 別に文献 carved。複数 cutoff を持てる (e.g. low / high prognosis tier)
+ */
+export interface TmtvCutoff {
+    label: string;          // UI 表示用 (e.g. "DLBCL CAR-T threshold")
+    valueCc: number;        // cutoff (cc)
+    /** "above" cutoff のとき alert (PFS 短い) — 通常 "above" */
+    direction: 'above' | 'below';
+    /** 出典の論文タイトル + URL (UI tooltip) */
+    sourceLabel: string;
+    sourceUrl?: string;
+}
+
 export interface TracerPreset {
     id: 'fdg' | 'psma' | 'dotatate' | 'amyloid' | 'fes' | 'tau' | 'custom';
     name: string;
@@ -31,6 +44,8 @@ export interface TracerPreset {
     detectKeywords: string[];
     /** 簡単な説明 (UI tooltip) */
     description: string;
+    /** TMTV prognostic cutoffs (該当 cancer の参考値、複数可) */
+    tmtvCutoffs?: TmtvCutoff[];
 }
 
 export const TRACER_PRESETS: TracerPreset[] = [
@@ -50,6 +65,22 @@ export const TRACER_PRESETS: TracerPreset[] = [
         ],
         detectKeywords: ['fdg', 'fluorodeoxyglucose', '18f-fdg', 'f-18 fdg'],
         description: 'Generic oncology FDG PET (SUV 2.5 threshold, hot CLUT, 0–6 window)',
+        tmtvCutoffs: [
+            {
+                label: 'DLBCL CAR-T (TMTV)',
+                valueCc: 48.4,
+                direction: 'above',
+                sourceLabel: 'Mussetti et al. 2024 (CAR-T B-cell lymphoma PFS)',
+                sourceUrl: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC11666922/',
+            },
+            {
+                label: 'NSCLC poor prognosis (TMTV)',
+                valueCc: 80,
+                direction: 'above',
+                sourceLabel: 'Zhang et al. 2022 (NSCLC overall survival)',
+                sourceUrl: 'https://ejhi.springeropen.com/articles/10.1186/s41824-022-00158-x',
+            },
+        ],
     },
     {
         id: 'psma',

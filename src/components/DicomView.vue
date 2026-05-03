@@ -1931,6 +1931,20 @@ const handleSphereClick = (e: MouseEvent) => {
   if (!segStore.petVolumeRef) return;
   const [x, y] = getCanvasXY(e);
   const w = screenToWorld(id, x, y);
+
+  // Reference sphere 配置モード (liver / bloodPool) なら通常の sphere ROI 経路を bypass
+  if (segStore.referencePlacementMode) {
+    const kind = segStore.referencePlacementMode;
+    // PERCIST 既定: liver = 30mm 球 (3cm)、bloodPool = 10mm 球 (1cm)
+    const refRadius = kind === 'liver' ? 15 : 5;
+    const stats = sphereStatsInPet(segStore.petVolumeRef, w, refRadius);
+    segStore.setReferenceSphere(kind, w, refRadius, {
+      suvMean: stats.suvMean, suvStd: stats.suvStd, voxelCount: stats.voxelCount,
+    });
+    show();
+    return;
+  }
+
   const radius = segStore.sphere?.radiusMm ?? 10;
   // sphere が無ければ作成、あれば center だけ更新 (crosshair も同位置に)
   if (!segStore.sphere) segStore.setSphere(w, radius);
