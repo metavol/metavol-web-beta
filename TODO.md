@@ -116,3 +116,51 @@ UI 案: NIfTI series card のメニュー or ☰ から "Inspect NIfTI bytes" �
 - `dcmjs-codecs` — JPEG Lossless 復号で使用、別エンコーディング DICOM が来ない運用なら不要
 
 削減できればバンドル 500KB 問題の根本対策にもなる。
+
+---
+
+## ペルソナ別の現状サマリ (2026-05-03 commit e649358 時点)
+
+### Persona 1 (PET/CT segmentation, MTV/TLG 測定) — **完成度 95%**
+- ✅ DICOM ロード (PET+CT) → autoLayout で multi-tile DicomSlice
+- ✅ PET Standard ボタン → 2x2 (CT axial / PET axial / Fusion axial / PET MIP)
+- ✅ Threshold (SUV preset 0-3 / 0-6 / 0-10 / 0-15 / Other 0-100/1000/10000)
+- ✅ Sphere ROI / Polygon ROI (slice add/erase, Esc, Ctrl+Z)
+- ✅ Find islands + Assign label
+- ✅ Lesion table (SUVmax, SUVmean, MTV, TLG)
+- ✅ **Lesion CSV export** (`#, Label, SUVmax, SUVmean, MTV_cc, TLG, VoxelCount, Centroid xyz mm`)
+- ✅ NIfTI mask save + JSON sidecar
+- ✅ NIfTI mask **load (round-trip)** with seriesUID validation
+- 残: lesion 別 SUV histogram、SUVpeak (1cc sphere centered at SUVmax)、PDF レポート出力
+
+### Persona 2 (Quick viewer) — **完成度 85%**
+- ✅ DICOM/NIfTI ファイル D&D
+- ✅ 自動 modality 推定 (NIfTI filename heuristics)
+- ✅ Series card に description / DCM/NII chip / matrix size
+- ✅ Image overlay (Image X/N, patient info corners) 即時表示
+- ✅ Ctrl+wheel zoom / 中ボタン pan (Volume / DicomSlice 両対応)
+- ✅ Box 複製 (More メニュー → Duplicate this box)
+- ✅ **Shareable URL** `?url=https://...` で直接ロード (commit e649358)
+- 残: NIfTI raw byte view (TODO に詳細)、デモデータの公開リンク
+- 残: MIP / cor / sag への切替がもっとワンアクションで (現在は plane menu)
+
+### Persona 3 (PET/MR + radiomics) — **完成度 70%**
+- ✅ MR-PET registration (☰ Preprocessing → Auto-register、進捗 chip 付き)
+- ✅ Fusion D&D (modality chip drag → 任意 box)
+- ✅ Fusion box の base/overlay 別 CLUT + W/L active layer toggle
+- ✅ Blend slider in titlebar
+- ✅ **MR Volume box で Polygon/Sphere ROI 描画 → PET grid に保存** (アーキテクチャ的に既に支持。screen→world→PET voxel 変換)
+- 残: MR ROI 描画時の UX cue (「PET grid に保存されます」のヒント表示)
+- 残: radiomics features (texture: GLCM/GLRLM/GLSZM 等) の export
+- 残: 複数 ROI を横並びで radiomics score 比較する UI (DataBox 抽象が活きる場面)
+
+---
+
+## 次の優先順位 (commit e649358 以降)
+
+1. **DataBox abstraction Phase 1** (P1-A): `BoxTitlebar.vue` 抽出。機能変化なし refactor
+2. **NOTICES / THIRD_PARTY_LICENSES** (P2-A): `license-checker` で生成、配布物に同梱
+3. **MR ROI UX cue** (Persona 3 仕上げ): 描画開始時に「This ROI will be stored on PET grid」インラインヒント
+4. **公開デモデータ** (Persona 2 仕上げ): `public/demo/*.nii.gz` + `?demo=lung01` mapping
+5. **バンドル分割** (P2-C): manual chunk
+6. **DicomView.vue composable 化** (P1-B): `useSphereROI` / `usePolygonROI` 等
