@@ -184,7 +184,10 @@ const applyAutoFit = () => {
 
 // URL params:
 //   ?debug=1       voxel inspector を初期有効化
-//   ?dev=case001   sample-data/case001 を自動 fetch + loadFiles + PET Standard
+//   ?dev=case001   sample-data/case001 を自動 fetch + loadFiles (dev middleware 経由、ローカル開発限定)
+//   ?url=https://...  外部 URL から DICOM/NIfTI を fetch + loadFiles
+//                     複数指定: ?url=u1&url=u2 もしくは ?url=u1,u2 (カンマ区切り)
+//                     CORS 必須: ホスト側で Access-Control-Allow-Origin を返すこと
 // Ctrl+Shift+D で voxel inspector を toggle
 onMounted(() => {
   try {
@@ -192,6 +195,18 @@ onMounted(() => {
     if (p.get('debug') === '1') debugMode.value = true;
     const devCase = p.get('dev');
     if (devCase) loadDevCase(devCase);
+    // 外部 URL ロード (公開デモ / リンク共有用)
+    const urlParams = p.getAll('url');
+    if (urlParams.length > 0) {
+      const all: string[] = [];
+      for (const u of urlParams) {
+        for (const x of u.split(',')) {
+          const t = x.trim();
+          if (t) all.push(t);
+        }
+      }
+      if (all.length > 0) loadFromExternalUrls(all);
+    }
   } catch {}
   window.addEventListener('keydown', (e: KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'D' || e.key === 'd')){
@@ -242,6 +257,46 @@ const loadDevCase = async (caseId: string) => {
   } catch (err) {
     console.warn('[dev-case] failed', err);
   }
+};
+
+// 外部 URL (?url=https://...) から fetch + loadFiles。Persona 2 (quick viewer) 用 shareable link。
+// CORS 必須。ホストが Access-Control-Allow-Origin を返さないと fetch 失敗する。
+// 複数 URL を並列 fetch (concurrency=4)、すべて File 化してから一括 loadFiles。
+const loadFromExternalUrls = async (urls: string[]) => {
+  if (urls.length === 0) return;
+  console.log(`[ext-url] loading ${urls.length} file(s)...`);
+  const t0 = performance.now();
+  const files: File[] = [];
+  const concurrency = Math.min(4, urls.length);
+  let idx = 0;
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (idx < urls.length) {
+      const my = idx++;
+      const u = urls[my];
+      try {
+        const r = await fetch(u);
+        if (!r.ok) {
+          console.warn(`[ext-url] fetch failed (HTTP ${r.status}): ${u}`);
+          continue;
+        }
+        const buf = await r.arrayBuffer();
+        // basename を URL の最終 segment から取得 (NIfTI の filename modality 推定に使う)
+        const baseName = u.split(/[?#]/)[0].split('/').pop() || `remote-${my}`;
+        files[my] = new File([buf], baseName, { type: 'application/octet-stream' });
+      } catch (err) {
+        console.warn(`[ext-url] fetch error for ${u}:`, err);
+      }
+    }
+  });
+  await Promise.all(workers);
+  const t1 = performance.now();
+  const ok = files.filter(Boolean);
+  console.log(`[ext-url] fetched ${ok.length}/${urls.length} files in ${(t1 - t0).toFixed(0)}ms`);
+  if (ok.length === 0) {
+    alert(`Failed to fetch any of the ${urls.length} URL(s). Check the browser console for details (CORS / network).`);
+    return;
+  }
+  loadFiles(ok);
 };
 
 // ===== 自動保存 + リカバリ (IndexedDB persistence) =====
