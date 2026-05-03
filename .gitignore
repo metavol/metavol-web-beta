@@ -29,3 +29,6 @@ sample-data/
 
 # Playwright MCP scratch output
 .playwright-mcp/
+
+# Test screenshots from Playwright runs
+/*.png

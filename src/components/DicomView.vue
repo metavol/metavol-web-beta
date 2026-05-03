@@ -3916,6 +3916,10 @@ defineExpose({
       <v-icon icon="mdi-image-off-outline" size="56" />
       <span class="mv-imagearea-empty-title">No image</span>
       <span class="mv-imagearea-empty-hint">Drop DICOM or NIfTI files (.nii / .nii.gz) here</span>
+      <span class="mv-imagearea-empty-hint mv-empty-link-hint">
+        Or share a link with <code>?url=https://your-host/scan.nii.gz</code>
+        (multiple <code>?url=</code> params allowed; CORS-permitted hosts only)
+      </span>
     </div>
     <div class="mv-tile-grid" :class="{ 'is-no-gap': noGapMode }" :style="gridStyle">
       <imagebox
@@ -4063,6 +4067,20 @@ defineExpose({
   font-size: 11px;
   font-family: 'JetBrains Mono', 'Consolas', monospace;
   color: var(--mv-text-dim, #8FA0B0);
+}
+.mv-empty-link-hint {
+  margin-top: 4px;
+  text-align: center;
+  max-width: 600px;
+  line-height: 1.5;
+  color: var(--mv-text-muted);
+}
+.mv-empty-link-hint code {
+  background: rgba(0, 212, 170, 0.08);
+  border: 1px solid var(--mv-border, #2a3441);
+  padding: 1px 4px;
+  border-radius: 2px;
+  color: var(--mv-accent, #00D4AA);
 }
 
 .mv-inspector-header {

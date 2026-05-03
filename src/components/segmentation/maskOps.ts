@@ -274,8 +274,10 @@ export interface LesionStat {
     mtvCc: number;
     suvMax: number;
     suvMean: number;
+    suvPeak: number;       // 1 cc 球を SUVmax voxel に中心配置したときの平均 SUV (簡易 PERCIST-like)
     tlg: number;
     centroidWorld: [number, number, number];
+    suvMaxWorld: [number, number, number];   // SUVmax voxel の世界座標 (jump 用にも)
 }
 
 export const summarizeLesions = (
@@ -302,6 +304,10 @@ export const summarizeLesions = (
     const sumSuv = new Float64Array(count + 1);
     const maxSuv = new Float64Array(count + 1);
     for (let c = 0; c <= count; c++) maxSuv[c] = -Infinity;
+    // SUVmax voxel の voxel 座標 (SUVpeak 計算用に保持)
+    const maxI = new Int32Array(count + 1);
+    const maxJ = new Int32Array(count + 1);
+    const maxK = new Int32Array(count + 1);
     const sumI = new Float64Array(count + 1);
     const sumJ = new Float64Array(count + 1);
     const sumK = new Float64Array(count + 1);
@@ -317,7 +323,10 @@ export const summarizeLesions = (
                 if (c !== 0) {
                     const v = voxel[p];
                     sumSuv[c] += v;
-                    if (v > maxSuv[c]) maxSuv[c] = v;
+                    if (v > maxSuv[c]) {
+                        maxSuv[c] = v;
+                        maxI[c] = i; maxJ[c] = j; maxK[c] = k;
+                    }
                     sumI[c] += i;
                     sumJ[c] += j;
                     sumK[c] += k;
@@ -329,6 +338,10 @@ export const summarizeLesions = (
             }
         }
     }
+
+    // SUVpeak: 1 cc 球 (radius = (3/4π)^(1/3) cm = 0.6204 cm = 6.204 mm) を SUVmax voxel に中心配置
+    // した平均 SUV (簡易 PERCIST。VOI 外に球がはみ出す場合もそのまま 1cc 球として扱う)。
+    const SUVPEAK_RADIUS_MM = 6.204;
 
     const labelNameById = new Map<number, string>();
     for (const l of labels) labelNameById.set(l.id, l.name);
@@ -345,6 +358,10 @@ export const summarizeLesions = (
         }
         work.set(sumI[c] / n, sumJ[c] / n, sumK[c] / n);
         const cw = voxelToWorld(work, pet);
+        // SUVmax voxel の世界座標 (SUVpeak 球の中心 + jump 用)
+        work.set(maxI[c] + 0.5, maxJ[c] + 0.5, maxK[c] + 0.5);
+        const mw = voxelToWorld(work, pet);
+        const peakStats = sphereStatsInPet(pet, mw, SUVPEAK_RADIUS_MM);
         const mean = sumSuv[c] / n;
         const mtvCc = (n * voxVolMm3) / 1000;
         out.push({
@@ -355,8 +372,10 @@ export const summarizeLesions = (
             mtvCc,
             suvMax: maxSuv[c],
             suvMean: mean,
+            suvPeak: peakStats.suvMean,
             tlg: mean * mtvCc,
             centroidWorld: [cw.x, cw.y, cw.z],
+            suvMaxWorld: [mw.x, mw.y, mw.z],
         });
     }
     out.sort((a, b) => b.suvMax - a.suvMax);

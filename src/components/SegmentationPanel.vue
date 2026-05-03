@@ -299,8 +299,10 @@ const onExportLesionCsv = () => {
     if (rows.length === 0) return;
     const esc = (s: string) => `"${s.replace(/"/g, '""')}"`;
     const headers = [
-        '#', 'Label', 'SUVmax', 'SUVmean', 'MTV_cc', 'TLG',
-        'VoxelCount', 'Centroid_x_mm', 'Centroid_y_mm', 'Centroid_z_mm',
+        '#', 'Label', 'SUVmax', 'SUVpeak_1cc', 'SUVmean', 'MTV_cc', 'TLG',
+        'VoxelCount',
+        'Centroid_x_mm', 'Centroid_y_mm', 'Centroid_z_mm',
+        'SUVmax_x_mm', 'SUVmax_y_mm', 'SUVmax_z_mm',
     ];
     const lines = [headers.join(',')];
     rows.forEach((l, i) => {
@@ -308,6 +310,7 @@ const onExportLesionCsv = () => {
             String(i + 1),
             esc(l.labelName),
             l.suvMax.toFixed(4),
+            l.suvPeak.toFixed(4),
             l.suvMean.toFixed(4),
             l.mtvCc.toFixed(4),
             l.tlg.toFixed(4),
@@ -315,6 +318,9 @@ const onExportLesionCsv = () => {
             l.centroidWorld[0].toFixed(2),
             l.centroidWorld[1].toFixed(2),
             l.centroidWorld[2].toFixed(2),
+            l.suvMaxWorld[0].toFixed(2),
+            l.suvMaxWorld[1].toFixed(2),
+            l.suvMaxWorld[2].toFixed(2),
         ].join(','));
     });
     // BOM 付き UTF-8 で Excel が文字化けしないようにする
@@ -325,6 +331,88 @@ const onExportLesionCsv = () => {
         ? store.petVolumeRef.metadata.seriesUID.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 32)
         : 'lesions';
     triggerDownload(blob, `${sid}_lesions_${ts}.csv`);
+};
+
+// 全ラベルの SUV ヒストグラム + first-order 統計を 1 CSV に出力。
+// 1 行 = 1 (label × bin)。labels が複数あれば縦に並ぶ。
+// summary 用に 1 ラベル毎のサマリ行 (bin = "summary") を先頭に記録する。
+const onExportHistogramCsv = () => {
+    const pet = store.petVolumeRef;
+    const mask = store.finalMask;
+    if (!pet || !mask) return;
+    const pix = pet.voxel;
+    const N = mask.length;
+
+    // ラベル毎に PET voxel を 1 pass で集計
+    type Acc = { label: string; n: number; sum: number; sumSq: number; min: number; max: number; vals: number[] };
+    const accByLabel = new Map<number, Acc>();
+    for (const lbl of store.labels) {
+        accByLabel.set(lbl.id, { label: lbl.name, n: 0, sum: 0, sumSq: 0, min: Infinity, max: -Infinity, vals: [] });
+    }
+    for (let i = 0; i < N; i++) {
+        const id = mask[i];
+        if (id === 0) continue;
+        const acc = accByLabel.get(id);
+        if (!acc) continue;
+        const v = pix[i];
+        acc.n++;
+        acc.sum += v;
+        acc.sumSq += v * v;
+        if (v < acc.min) acc.min = v;
+        if (v > acc.max) acc.max = v;
+        acc.vals.push(v);
+    }
+
+    const BINS = 30;
+    const lines: string[] = [];
+    // Summary section
+    lines.push('# Per-label first-order statistics');
+    lines.push('label_id,label_name,voxel_count,min,max,mean,std,median,p10,p25,p75,p90');
+    for (const [id, acc] of accByLabel) {
+        if (acc.n === 0) continue;
+        const mean = acc.sum / acc.n;
+        const variance = Math.max(0, acc.sumSq / acc.n - mean * mean);
+        const std = Math.sqrt(variance);
+        const sorted = acc.vals.slice().sort((a, b) => a - b);
+        const pct = (q: number) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(q * sorted.length)))];
+        lines.push([
+            id, `"${acc.label.replace(/"/g, '""')}"`, acc.n,
+            acc.min.toFixed(4), acc.max.toFixed(4), mean.toFixed(4), std.toFixed(4),
+            pct(0.50).toFixed(4), pct(0.10).toFixed(4), pct(0.25).toFixed(4),
+            pct(0.75).toFixed(4), pct(0.90).toFixed(4),
+        ].join(','));
+    }
+    // Histogram section: 1 行 = label × bin
+    lines.push('');
+    lines.push(`# Histograms (${BINS} bins from 0 to per-label max)`);
+    lines.push('label_id,label_name,bin_index,bin_lo,bin_hi,count');
+    for (const [id, acc] of accByLabel) {
+        if (acc.n === 0) continue;
+        const lo = 0;
+        const hi = acc.max > lo ? acc.max : lo + 1;
+        const bw = (hi - lo) / BINS;
+        const counts = new Array<number>(BINS).fill(0);
+        for (const v of acc.vals) {
+            let bi = Math.floor((v - lo) / bw);
+            if (bi < 0) bi = 0;
+            if (bi >= BINS) bi = BINS - 1;
+            counts[bi]++;
+        }
+        for (let b = 0; b < BINS; b++) {
+            lines.push([
+                id, `"${acc.label.replace(/"/g, '""')}"`, b,
+                (lo + b * bw).toFixed(4), (lo + (b + 1) * bw).toFixed(4), counts[b],
+            ].join(','));
+        }
+    }
+
+    const csv = '﻿' + lines.join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+    const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+    const sid = store.petVolumeRef?.metadata?.seriesUID
+        ? store.petVolumeRef.metadata.seriesUID.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 32)
+        : 'histograms';
+    triggerDownload(blob, `${sid}_histograms_${ts}.csv`);
 };
 
 // TLG / MTV は値の幅が大きいので桁数に応じて表示を切替
@@ -620,8 +708,9 @@ const polygonModeProxy = computed({
                     </v-btn>
                 </div>
                 <div v-else class="mv-hint">
-                    Click on the PET image with the Sphere ROI tool<br>
-                    Wheel inside the sphere to change radius
+                    Click on any registered Volume box (PT/CT/MR/Fusion) with the Sphere ROI tool.<br>
+                    Wheel inside the sphere to change radius.<br>
+                    <span class="mv-hint-grid">Stats are always sampled from the active PT volume.</span>
                 </div>
             </section>
 
@@ -648,7 +737,8 @@ const polygonModeProxy = computed({
                 </v-btn-toggle>
                 <div class="mv-hint mt-1">
                     Left click = vertex / Right click or double click = finish<br>
-                    Esc = cancel / Ctrl+Z = undo
+                    Esc = cancel / Ctrl+Z = undo<br>
+                    <span class="mv-hint-grid">Paint on any registered Volume box (PT/CT/MR/Fusion) — mask is stored on the PET grid.</span>
                 </div>
             </section>
 
@@ -696,12 +786,22 @@ const polygonModeProxy = computed({
 
             <!-- Histogram (per label) -->
             <section class="mv-section">
-                <div class="mv-section-title">
-                    <v-icon icon="mdi-chart-bar" size="x-small" />
-                    Histogram — PET ({{ store.thresholdUnit }})
-                    <span v-if="currentLabel" class="mv-hist-label-name" :style="{ color: currentLabelColorCss }">
-                        {{ currentLabel.name }}
+                <div class="mv-section-title mv-section-title-row">
+                    <span>
+                        <v-icon icon="mdi-chart-bar" size="x-small" />
+                        Histogram — PET ({{ store.thresholdUnit }})
+                        <span v-if="currentLabel" class="mv-hist-label-name" :style="{ color: currentLabelColorCss }">
+                            {{ currentLabel.name }}
+                        </span>
                     </span>
+                    <v-btn
+                        size="x-small" variant="text" density="compact"
+                        :disabled="!store.finalMask || store.labels.length === 0"
+                        @click="onExportHistogramCsv"
+                        title="Export histograms for all labels (CSV)"
+                    >
+                        <v-icon icon="mdi-download" size="x-small" class="mr-1" />CSV
+                    </v-btn>
                 </div>
 
                 <template v-if="labelHistogram && labelHistogram.count > 0">
@@ -815,6 +915,7 @@ const polygonModeProxy = computed({
                                     <th>#</th>
                                     <th>Label</th>
                                     <th class="num">SUVmax</th>
+                                    <th class="num">SUVpeak<br><span class="mv-th-unit">1cc</span></th>
                                     <th class="num">SUVmean</th>
                                     <th class="num">MTV<br><span class="mv-th-unit">cc</span></th>
                                     <th class="num">TLG</th>
@@ -833,6 +934,7 @@ const polygonModeProxy = computed({
                                         <span class="mv-lesion-label-name">{{ l.labelName }}</span>
                                     </td>
                                     <td class="num mv-mono mv-accent">{{ l.suvMax.toFixed(2) }}</td>
+                                    <td class="num mv-mono">{{ l.suvPeak.toFixed(2) }}</td>
                                     <td class="num mv-mono">{{ l.suvMean.toFixed(2) }}</td>
                                     <td class="num mv-mono">{{ fmtMtv(l.mtvCc) }}</td>
                                     <td class="num mv-mono">{{ fmtTlg(l.tlg) }}</td>
@@ -842,6 +944,7 @@ const polygonModeProxy = computed({
                                 <tr>
                                     <td colspan="2" class="mv-tfoot-label">Total</td>
                                     <td class="num mv-mono mv-accent">{{ lesionTotals.maxSuv.toFixed(2) }}</td>
+                                    <td class="num mv-mono">—</td>
                                     <td class="num mv-mono">—</td>
                                     <td class="num mv-mono">{{ fmtMtv(lesionTotals.totalMtv) }}</td>
                                     <td class="num mv-mono">{{ fmtTlg(lesionTotals.totalTlg) }}</td>
@@ -1096,6 +1199,17 @@ const polygonModeProxy = computed({
     font-size: 11px;
     color: var(--mv-text-muted);
     line-height: 1.5;
+}
+/* MR/CT 描画 → PET grid に保存される、という導線を強調する一文 */
+.mv-hint-grid {
+    display: inline-block;
+    margin-top: 2px;
+    padding: 2px 6px;
+    border-radius: 2px;
+    background: rgba(0, 212, 170, 0.08);
+    border-left: 2px solid var(--mv-accent, #00D4AA);
+    color: var(--mv-text-dim, #8FA0B0);
+    font-size: 10px;
 }
 
 .mv-warn-text {

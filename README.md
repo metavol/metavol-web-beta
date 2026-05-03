@@ -38,3 +38,18 @@ npm run dev
 
 画面パーツ・ImageBox の種類・ツール・機能名・ドメイン概念をまとめた辞書: [GLOSSARY.md](./GLOSSARY.md)
 （開発者と AI アシスタントとの会話を共通化する用途）。
+
+## サードパーティライセンス
+
+本プロジェクトは多数の OSS パッケージに依存しています。全パッケージのライセンス一覧は
+[THIRD_PARTY_LICENSES.md](./THIRD_PARTY_LICENSES.md) を参照。
+
+主要な依存:
+- **Vue 3** / **Vuetify 3** / **Vite** / **Pinia** — MIT
+- **dicom-parser** / **nifti-reader-js** / **dcmjs-codecs** — MIT
+- **three.js** — MIT
+- **@mdi/font** / **roboto-fontface** — Apache-2.0 (NOTICE 同梱必須)
+- **pako** (gzip) — MIT AND Zlib
+- **typescript** — Apache-2.0
+
+ライセンス一覧は `npx license-checker --production --json` で再生成できます。
