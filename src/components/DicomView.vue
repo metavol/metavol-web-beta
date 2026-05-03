@@ -48,6 +48,14 @@ import { solve } from "./linalg";
 import * as THREE from 'three';
 import {cluts, labelClut} from './Clut.ts';
 import * as nifti from 'nifti-reader-js';
+import { gunzip as fflateGunzip } from 'fflate';
+
+// fflate の async gunzip を Promise 化。内部で Web Worker (inline blob) で実行されるため
+// メインスレッドは block されない。372MB の decompress でも UI 応答性は維持される。
+const gunzipAsync = (data: Uint8Array): Promise<Uint8Array> =>
+    new Promise((resolve, reject) => {
+        fflateGunzip(data, (err, out) => err ? reject(err) : resolve(out));
+    });
 import * as Phantom from './phantom.ts';
 import { useSegmentationStore } from '../stores/segmentation';
 import { sphereStatsInPet, fillPolygonOnSlice, findMaximumAxis as maxAxis } from './segmentation/maskOps';
@@ -2438,24 +2446,26 @@ const promoteBoxToVolume = (boxId: number, seriesIdx: number) => {
 
 const loadFromLocal = (f: File) => {
   const reader = new FileReader();
-  reader.onload = () => {
-
-    if (reader.result !== null) {
-      const buf = reader.result as ArrayBuffer;
-      const u8a = new Uint8Array(buf);
-      try{
-        const dataSet = parseDicom(u8a) as MyDicom;
-        bagOfFiles.push(dataSet);
-      }catch{
-        try{
-          loadNii(buf, f.name);
-        }catch{
-          bagOfFiles.push(u8a);
-        }
-      }
-    } else {
+  // async: NIfTI .nii.gz の場合 loadNii 内で fflate gunzip を Worker で行い、
+  // 372MB クラスでも main thread を block しない。
+  reader.onload = async () => {
+    if (reader.result === null) {
       // result null: push placeholder so the load-completion poll never hangs
       bagOfFiles.push(new Uint8Array(0));
+      return;
+    }
+    const buf = reader.result as ArrayBuffer;
+    const u8a = new Uint8Array(buf);
+    try {
+      const dataSet = parseDicom(u8a) as MyDicom;
+      bagOfFiles.push(dataSet);
+    } catch {
+      try {
+        await loadNii(buf, f.name);
+      } catch (err) {
+        console.warn(`[loadFromLocal] not DICOM and not NIfTI: ${f.name}`, err);
+        bagOfFiles.push(u8a);
+      }
     }
   };
   reader.onerror = () => {
@@ -2469,10 +2479,22 @@ const loadFromLocal = (f: File) => {
   reader.readAsArrayBuffer(f);
 };
 
-const loadNii = (arraybuffer: ArrayBuffer, filename?: string) => {
+const loadNii = async (arraybuffer: ArrayBuffer, filename?: string) => {
 
+  // .nii.gz は fflate.gunzip を Web Worker (inline blob) で async 実行。
+  // 旧 nifti.decompress() は内部で fflate.decompressSync をメインスレッドで呼んで
+  // 372MB クラスで 3-7s UI freeze していたのを解消。
   if (nifti.isCompressed(arraybuffer)){
-    arraybuffer = nifti.decompress(arraybuffer);
+    const t0 = performance.now();
+    const u8 = new Uint8Array(arraybuffer);
+    const decompressed = await gunzipAsync(u8);
+    arraybuffer = decompressed.buffer.slice(
+      decompressed.byteOffset,
+      decompressed.byteOffset + decompressed.byteLength,
+    );
+    const ms = performance.now() - t0;
+    const mb = (decompressed.byteLength / 1024 / 1024).toFixed(1);
+    console.log(`[loadNii] gunzip ${filename ?? '?'}: ${mb} MB in ${ms.toFixed(0)}ms (worker)`);
   }
 
   if (nifti.isNIFTI(arraybuffer)) {
