@@ -32,4 +32,11 @@ export interface VolumeMetadata {
     // 元データの voxel datatype label (例 'Int16', 'Uint16', 'Float32')。
     // 内部 voxel は常に Float32 だが、ロード元が何だったかを表示用に保持。
     datatypeName?: string;
+
+    // NIfTI ロード時の元 header (nifti-reader-js NIFTI1 オブジェクト)。
+    // 「View NIfTI header」UI で field 一覧表示用。DICOM では undefined。
+    niftiHeader?: any;
+
+    // NIfTI ファイル名 (raw bytes inspector / header viewer の表示タイトル用)
+    sourceFilename?: string;
 }

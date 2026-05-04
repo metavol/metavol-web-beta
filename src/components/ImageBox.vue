@@ -402,7 +402,10 @@ const drawNiftiSlice = async function(pix: Float32Array | Int16Array,
           }
 
           if (overlay && vm){
-            const mx = Math.floor(vm.x), my = Math.floor(vm.y), mz = Math.floor(vm.z);
+            // Voxel center 規約 = 整数座標。floor + 0.5 で round-to-nearest-center。
+            // (PET 側の trilinear は半 voxel 中心基準で動作するため、floor() のままでは
+            // PET エッジとマスクエッジが ½ voxel ずれて見える)
+            const mx = Math.floor(vm.x + 0.5), my = Math.floor(vm.y + 0.5), mz = Math.floor(vm.z + 0.5);
             if (mx>=0 && mx<overlay.nx && my>=0 && my<overlay.ny && mz>=0 && mz<overlay.nz){
               const lid = overlay.mask[overlay.ny*overlay.nx*mz + overlay.nx*my + mx];
               if (lid > 0){
@@ -543,7 +546,8 @@ const drawNiftiSliceFusion = async function(pix0: Float32Array | Int16Array,
           }
 
           if (overlay && vm){
-            const mx = Math.floor(vm.x), my = Math.floor(vm.y), mz = Math.floor(vm.z);
+            // Voxel center 規約 = 整数座標 (floor + 0.5 で nearest center 選択)
+            const mx = Math.floor(vm.x + 0.5), my = Math.floor(vm.y + 0.5), mz = Math.floor(vm.z + 0.5);
             if (mx>=0 && mx<overlay.nx && my>=0 && my<overlay.ny && mz>=0 && mz<overlay.nz){
               const lid = overlay.mask[overlay.ny*overlay.nx*mz + overlay.nx*my + mx];
               if (lid > 0){

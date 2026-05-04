@@ -167,6 +167,20 @@
         />
       </div>
 
+      <!-- nii.gz gunzip 進捗 (DecompressionStream chunk-by-chunk) -->
+      <div v-if="niftiGunzipProgress.inProgress" class="mv-jpeg-progress mr-2" style="background: rgba(122, 208, 255, 0.10);">
+        <v-icon icon="mdi-zip-box-outline" size="x-small" class="mr-1" />
+        <span class="mv-jpeg-progress-label">
+          gunzip {{ niftiGunzipProgress.name }}: {{ niftiGunzipProgress.mb }} MB
+        </span>
+        <v-progress-linear
+          indeterminate
+          height="3"
+          color="primary"
+          class="mv-jpeg-progress-bar"
+        />
+      </div>
+
       <!-- MR↔PET registration 進捗 chip (Inspector からハンバーガーへの移管に伴い app-bar に出す) -->
       <div v-if="segStore.mrRegistrationInProgress" class="mv-jpeg-progress mr-2" style="background: rgba(0, 212, 170, 0.10);">
         <v-icon icon="mdi-vector-link" size="x-small" class="mr-1 mv-spin" />
@@ -653,7 +667,10 @@ const imageBoxW = ref(w);
 const imageBoxH = ref(h);
 const closingImages = ref(false);
 const tileN = ref(getTileN());
-const syncImageBox = ref(true);  // default ON: PET Standard 等のレイアウトで paging を全 box 連動させる
+// default OFF: NIfTI を 2 つドラッグしただけのときに勝手に paging が連動して
+// 視点が壊れるのを防ぐ。PET Standard / Triplanar 等のレイアウト関数は
+// 個別に syncImageBox.value = true を設定する。
+const syncImageBox = ref(false);
 const voxelInspector = ref(false);
 const showOverlayInfo = ref(true);
 const noGapMode = ref(true);
@@ -823,6 +840,17 @@ const jpegProgress = computed(() => {
   const total = (r?.jpegDecompressTotal as number) ?? 0;
   const percent = total > 0 ? (done / total) * 100 : 0;
   return { inProgress, done, total, percent };
+});
+
+// nii.gz gunzip 進捗 (累計 MB)。最終サイズは gzip 形式上事前取得困難のため進捗 % は出さず
+// 「currently X MB processed」表示 + indeterminate bar。
+const niftiGunzipProgress = computed(() => {
+  const r = dicomViewRef.value;
+  const inProgress = !!r?.niftiGunzipInProgress;
+  const name = (r?.niftiGunzipName as string) ?? '';
+  const bytes = (r?.niftiGunzipBytes as number) ?? 0;
+  const mb = (bytes / (1024 * 1024)).toFixed(1);
+  return { inProgress, name, mb };
 });
 
 // ===== Preprocessing menu (ハンバーガーから) =====

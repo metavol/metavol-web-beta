@@ -50,12 +50,57 @@ import {cluts, labelClut} from './Clut.ts';
 import * as nifti from 'nifti-reader-js';
 import { gunzip as fflateGunzip } from 'fflate';
 
-// fflate の async gunzip を Promise 化。内部で Web Worker (inline blob) で実行されるため
-// メインスレッドは block されない。372MB の decompress でも UI 応答性は維持される。
-const gunzipAsync = (data: Uint8Array): Promise<Uint8Array> =>
-    new Promise((resolve, reject) => {
+// gunzip 進捗の表示用 reactive state (App.vue から defineExpose 経由で参照)。
+// 並列 gunzip でもまず最も新しいファイル名を表示する単一 chip 想定。
+const niftiGunzipInProgress = ref(false);
+const niftiGunzipName = ref<string>('');
+const niftiGunzipBytes = ref(0);
+
+// gzip 解凍を Promise 化。優先度: native DecompressionStream → fflate (worker) フォールバック。
+//
+// DecompressionStream (Chrome 80+ / FF 113+ / Safari 16.4+):
+//   - browser 内蔵、追加 dep なし、native コードで高速
+//   - 進捗は ReadableStream の TransformStream で chunk 経過バイト数を tap
+//   - メインスレッド非ブロック (内部で background thread)
+//
+// fflate fallback (古い browser):
+//   - inline blob worker で gunzip。進捗 callback なし
+const gunzipAsync = async (data: Uint8Array, filename?: string): Promise<Uint8Array> => {
+    if (typeof DecompressionStream !== 'undefined') {
+        try {
+            niftiGunzipInProgress.value = true;
+            niftiGunzipName.value = filename ?? '';
+            niftiGunzipBytes.value = 0;
+            // Blob → ReadableStream → DecompressionStream → progress tap → arrayBuffer。
+            const blob = new Blob([data]);
+            let bytes = 0;
+            const tap = new TransformStream<Uint8Array, Uint8Array>({
+                transform(chunk, controller) {
+                    bytes += chunk.byteLength;
+                    // Vue reactivity の trigger 頻度を抑える (chunk あたりではなく ~5MB 毎に更新)
+                    if (bytes - niftiGunzipBytes.value > 5 * 1024 * 1024) {
+                        niftiGunzipBytes.value = bytes;
+                    }
+                    controller.enqueue(chunk);
+                },
+            });
+            const decompressed = blob.stream()
+                .pipeThrough(new DecompressionStream('gzip'))
+                .pipeThrough(tap);
+            const buf = await new Response(decompressed).arrayBuffer();
+            niftiGunzipBytes.value = bytes;
+            niftiGunzipInProgress.value = false;
+            return new Uint8Array(buf);
+        } catch (err) {
+            niftiGunzipInProgress.value = false;
+            console.warn('[loadNii] DecompressionStream failed, falling back to fflate:', err);
+        }
+    }
+    // fflate fallback (no progress callback)
+    return new Promise((resolve, reject) => {
         fflateGunzip(data, (err, out) => err ? reject(err) : resolve(out));
     });
+};
 import * as Phantom from './phantom.ts';
 import { useSegmentationStore } from '../stores/segmentation';
 import { usePerfStore } from '../stores/perf';
@@ -1783,7 +1828,8 @@ const mouseMove = (e: MouseEvent) => {
 
   if (leftButtonFunction.value == "zoom") {
     if (e.buttons == 1) {
-      doOneOrAll(id, (i:number) => {
+      // 同 plane の box にだけ伝播 (MIP / VR は除外)。Ctrl+wheel zoom と同じ方針。
+      doOneOrAllSamePlane(id, (i:number) => {
         if (isDicomSliceImageBoxInfo(i)){
           let r = 1.02;
           if (e.movementY > 0) r = 1 / r;
@@ -1812,10 +1858,12 @@ const wheel = (e: WheelEvent) => {
   const id = getIdOfEventOccured(e);
 
   // Ctrl/Cmd + wheel → 即時ズーム（視野中心固定）
+  // 同 plane の box にだけ伝播 (MIP / VR は除外)。axial をズームしているのに
+  // MIP まで縮小してしまうのを防ぐ。
   if (e.ctrlKey || e.metaKey){
     e.preventDefault();
     const r = e.deltaY > 0 ? 1 / 1.1 : 1.1;
-    doOneOrAll(id, (i: number) => {
+    doOneOrAllSamePlane(id, (i: number) => {
       if (isDicomSliceImageBoxInfo(i)){
         const dInfo = getDicomSliceImageBoxInfo(i);
         const zoom = dInfo.zoom ?? 1;
@@ -2251,7 +2299,20 @@ const onSetSeriesModality = (payload: { index: number; modality: 'PT' | 'CT' | '
 };
 
 const doSort = () => {
-  let serieses:string[] = [];
+  // 既存 seriesList を seed: DICOM 系には実 UID を、それ以外には unique sentinel を入れて
+  // append load 時に新ファイルが既存と同 SeriesUID なら同 series に統合、別 UID なら新 series 化、
+  // という挙動を保つ (sentinel は indexOf で当たらない一意文字列)。
+  let serieses: string[] = [];
+  for (let i = 0; i < seriesList.length; i++) {
+    const sl = seriesList[i];
+    if (sl?.myDicom && sl.myDicom.length > 0) {
+      const suid = sl.myDicom[0].string("x0020000e") ?? "";
+      const sd = sl.myDicom[0].string("x0008103e") ?? "";
+      serieses[i] = suid + sd;
+    } else {
+      serieses[i] = `__nondicom_${i}__`;
+    }
+  }
   for (const f of bagOfFiles){
 
     if (f instanceof Uint8Array){
@@ -2288,6 +2349,8 @@ const doSort = () => {
             seriesUID: `nii-${niftiIdx}-${Date.now()}`,
             seriesDescription: niftiDesc || (f.filename ?? undefined),
             datatypeName: f.datatypeName,
+            niftiHeader: f.niftiHeader,    // header viewer 用に保持
+            sourceFilename: f.filename,
           },
         }
       });
@@ -2346,6 +2409,77 @@ const loadFile = async (file: File) => {
 // modality / SUV factor も無視 (raw counts そのまま)。
 // WC/WW は voxel min/max を簡易サンプリング (10000 step) で推定。
 // Persona 2 (NIfTI orientation 検証) 用。
+// NIfTI header dialog 用 reactive state (volume card の "..." メニュー → "View NIfTI header")
+const niftiHeaderDialog = ref<{
+  open: boolean;
+  filename: string;
+  modality: string;
+  seriesUID: string;
+  datatypeName: string;
+  rows: Array<{ key: string; value: string }>;
+}>({
+  open: false, filename: '', modality: '', seriesUID: '', datatypeName: '', rows: [],
+});
+
+const onViewNiftiHeader = (sourceSeriesIdx: number) => {
+  if (sourceSeriesIdx < 0 || sourceSeriesIdx >= seriesList.length) return;
+  const src = seriesList[sourceSeriesIdx];
+  const v = src.volume;
+  const meta = v?.metadata as any;
+  if (!meta?.niftiHeader) {
+    alert('No NIfTI header available for this series (DICOM origin or load-time data not preserved).');
+    return;
+  }
+  // niftiHeader を field 一覧に整形 (内部表現は nifti-reader-js NIFTI1 オブジェクト)。
+  const hdr = meta.niftiHeader;
+  const rows: Array<{ key: string; value: string }> = [];
+  const fmt = (val: any): string => {
+    if (val == null) return '';
+    if (Array.isArray(val)) {
+      // matrix (2D array)
+      if (Array.isArray(val[0])) {
+        return val.map(row => row.map((x: number) => Number(x).toFixed(4)).join(', ')).join(' | ');
+      }
+      return val.map((x: any) => typeof x === 'number' ? Number(x).toFixed(4) : String(x)).join(', ');
+    }
+    if (typeof val === 'number') return Number.isInteger(val) ? String(val) : val.toFixed(6);
+    return String(val);
+  };
+  // 既知の主要 field を順番に並べる + その他はアルファベット順で末尾に
+  const priorityKeys = [
+    'magic', 'sizeof_hdr', 'datatypeCode', 'numBitsPerVoxel',
+    'dims', 'pixDims', 'qform_code', 'sform_code',
+    'affine', 'quatern_b', 'quatern_c', 'quatern_d',
+    'qoffset_x', 'qoffset_y', 'qoffset_z',
+    'srow_x', 'srow_y', 'srow_z',
+    'scl_slope', 'scl_inter', 'cal_min', 'cal_max',
+    'slice_code', 'slice_start', 'slice_end', 'slice_duration',
+    'xyzt_units', 'intent_code', 'intent_name', 'intent_p1', 'intent_p2', 'intent_p3',
+    'description', 'aux_file',
+    'toffset', 'glmin', 'glmax',
+  ];
+  const seen = new Set<string>();
+  for (const k of priorityKeys) {
+    if (k in hdr) {
+      rows.push({ key: k, value: fmt(hdr[k]) });
+      seen.add(k);
+    }
+  }
+  // それ以外の field
+  const others = Object.keys(hdr).filter(k => !seen.has(k) && typeof hdr[k] !== 'function').sort();
+  for (const k of others) {
+    rows.push({ key: k, value: fmt(hdr[k]) });
+  }
+  niftiHeaderDialog.value = {
+    open: true,
+    filename: meta.sourceFilename ?? `Series ${sourceSeriesIdx}`,
+    modality: meta.modality ?? '',
+    seriesUID: meta.seriesUID ?? '',
+    datatypeName: meta.datatypeName ?? '',
+    rows,
+  };
+};
+
 const inspectNiftiRaw = async (sourceSeriesIdx: number) => {
   if (sourceSeriesIdx < 0 || sourceSeriesIdx >= seriesList.length) return;
   const src = seriesList[sourceSeriesIdx];
@@ -2486,11 +2620,19 @@ const decompressAllJpegLossless = async (): Promise<void> => {
 };
 
 const loadFiles = (files: FileList | File[]) => {
-  initializeDicomListsImagesBoxInfos();
-  // 起動直後 (tileN=0 = box なし) に file を投げ込まれたら最低 1 box 表示してロード進捗を出す。
-  // PT/CT 揃いなら後段で setupPetStandardView が tileN=4 に拡張する。
-  if ((tileN.value ?? 0) <= 0) tileN.value = 1;
   const localFileList = Array.from(files);
+  if (localFileList.length === 0) return;
+
+  // 既に series が存在する場合は append モード: 既存 box / sync 状態を保持し、
+  // 新 series を追加 box として並べる。空状態 (初回ロード) はリセット。
+  const isAppend = seriesList.length > 0;
+  const startSeriesCount = seriesList.length;
+  const startBagLength = bagOfFiles.length;
+
+  if (!isAppend) {
+    initializeDicomListsImagesBoxInfos();
+    if ((tileN.value ?? 0) <= 0) tileN.value = 1;
+  }
 
   isLoading.value = true;
   for (const f of localFileList) {
@@ -2500,17 +2642,23 @@ const loadFiles = (files: FileList | File[]) => {
   // loadFromLocalは非同期に読み込むので、この段階では全部読み込み終了していない。
   // setIntervalで定期的にチェックして、読み込みが終了していたらソートしてインターバルをキャンセルする。
   let intervalId : any | null = null;
+  const expectedBagLength = startBagLength + localFileList.length;
   const callback = () => {
-    const msg = `${bagOfFiles.length} / ${localFileList.length}`;
+    const loadedThisRun = bagOfFiles.length - startBagLength;
+    const msg = `${loadedThisRun} / ${localFileList.length}`;
     if (imb.value && imb.value[0]) imb.value[0].clear(msg);
-    if (localFileList.length === bagOfFiles.length){
+    if (bagOfFiles.length >= expectedBagLength){
       clearInterval(intervalId!);
       doSort();
-      // 自動レイアウト:
-      //   - PT/CT 揃いなら PET Standard (2x2)
-      //   - それ以外は primary シリーズ数に応じて tileN を引き上げ各 Box にシリーズを割り当て
-      //   - NIfTI volume-only は Volume Box に昇格 (myDicom 必須の DicomSlice では描画不可)
-      autoLayoutAfterLoad();
+      if (isAppend) {
+        // 追加された series だけを末尾の新 box に並べる (既存 box は触らない)
+        appendNewSeriesAsBoxes(startSeriesCount);
+      } else {
+        // 自動レイアウト (初回ロード):
+        //   - primary シリーズ数に応じて tileN を引き上げ各 Box にシリーズを割り当て
+        //   - NIfTI volume-only は Volume Box に昇格 (myDicom 必須の DicomSlice では描画不可)
+        autoLayoutAfterLoad();
+      }
       show();
       isLoading.value = false;
       // 背景で全 JPEG Lossless frame を decompress。完了後にサムネ再生成 + 再描画。
@@ -2521,6 +2669,42 @@ const loadFiles = (files: FileList | File[]) => {
     }
   };
   intervalId = setInterval(callback, 100);
+};
+
+// append load 完了後: startSeriesCount 以降の新 series を末尾の box に追加する。
+// 既存 box (0..tileN-1) は触らない。MAX_AUTO_TILES を超える分はユーザに手動で
+// tile 数を増やしてもらう前提で省略。
+const appendNewSeriesAsBoxes = (startSeriesCount: number) => {
+  if (seriesList.length <= startSeriesCount) return;
+  const newPrimaryIdxs: number[] = [];
+  for (let i = startSeriesCount; i < seriesList.length; i++) {
+    if (seriesSummaries.value[i]?.isPrimary !== false) newPrimaryIdxs.push(i);
+  }
+  if (newPrimaryIdxs.length === 0) return;
+
+  const oldTileN = tileN.value ?? 0;
+  const targetTileN = Math.min(MAX_AUTO_TILES, oldTileN + newPrimaryIdxs.length);
+  tileN.value = targetTileN;
+
+  for (let k = 0; k < newPrimaryIdxs.length && oldTileN + k < targetTileN; k++) {
+    const boxIdx = oldTileN + k;
+    const seriesIdx = newPrimaryIdxs[k];
+    const s = seriesList[seriesIdx];
+    if (!s) continue;
+    while (imageBoxInfos.value.length <= boxIdx) {
+      imageBoxInfos.value.push(defaultInfo(imageBoxInfos.value.length));
+    }
+    const isNiftiOnly = (!s.myDicom || s.myDicom.length === 0) && !!s.volume;
+    if (isNiftiOnly) {
+      promoteBoxToVolume(boxIdx, seriesIdx);
+    } else {
+      const info = imageBoxInfos.value[boxIdx] as DicomSliceImageBoxInfo;
+      info.currentSeriesNumber = seriesIdx;
+      info.currentSliceNumber = 0;
+      info.description = seriesSummaries.value[seriesIdx]?.description ?? '';
+    }
+  }
+  applyAutoFit();
 };
 
 // loadFiles 完了後に呼ぶ自動レイアウト:
@@ -2638,13 +2822,14 @@ const loadFromLocal = (f: File) => {
 
 const loadNii = async (arraybuffer: ArrayBuffer, filename?: string) => {
 
-  // .nii.gz は fflate.gunzip を Web Worker (inline blob) で async 実行。
-  // 旧 nifti.decompress() は内部で fflate.decompressSync をメインスレッドで呼んで
+  // .nii.gz は native DecompressionStream (FF/Chrome/Safari 内蔵) で gunzip。
+  // chunk-by-chunk read で進捗が取れるので app-bar に MB 表示を出せる。
+  // 旧 nifti.decompress() は fflate.decompressSync (sync, blocking) を呼んでいて
   // 372MB クラスで 3-7s UI freeze していたのを解消。
   if (nifti.isCompressed(arraybuffer)){
     const t0 = performance.now();
     const u8 = new Uint8Array(arraybuffer);
-    const decompressed = await gunzipAsync(u8);
+    const decompressed = await gunzipAsync(u8, filename);
     arraybuffer = decompressed.buffer.slice(
       decompressed.byteOffset,
       decompressed.byteOffset + decompressed.byteLength,
@@ -3915,6 +4100,9 @@ const setupPetStandardView = async (overridePetIdx?: number, overrideCtIdx?: num
   autoFitMode.value = true;
   applyAutoFit();
 
+  // 全 box を paging 同期 (PET Standard 等のマルチ box レイアウトでは ON が自然)
+  syncImageBox.value = true;
+
   // ImageBox 再 init してから描画
   await nextTick();
   if (imb.value){
@@ -3975,6 +4163,7 @@ const setupTriplanarPt = async () => {
   refreshSegStoreVolumeRefs();
   autoFitMode.value = true;
   applyAutoFit();
+  syncImageBox.value = true;
   await nextTick();
   if (imb.value) for (const a of imb.value) a.init();
   show();
@@ -4041,6 +4230,7 @@ const setupTriplanarFused = async () => {
   refreshSegStoreVolumeRefs();
   autoFitMode.value = true;
   applyAutoFit();
+  syncImageBox.value = true;
   await nextTick();
   if (imb.value) for (const a of imb.value) a.init();
   show();
@@ -4073,6 +4263,7 @@ const setupPtOnly4up = async () => {
   refreshSegStoreVolumeRefs();
   autoFitMode.value = true;
   applyAutoFit();
+  syncImageBox.value = true;
   await nextTick();
   if (imb.value) for (const a of imb.value) a.init();
   show();
@@ -4120,6 +4311,7 @@ const setupCompare2up = async () => {
   refreshSegStoreVolumeRefs();
   autoFitMode.value = true;
   applyAutoFit();
+  syncImageBox.value = true;
   await nextTick();
   if (imb.value) for (const a of imb.value) a.init();
   show();
@@ -4236,6 +4428,24 @@ defineExpose({
   jpegDecompressInProgress,
   jpegDecompressDone,
   jpegDecompressTotal,
+  // nii.gz gunzip 進捗 (DecompressionStream chunk 単位)
+  niftiGunzipInProgress,
+  niftiGunzipName,
+  niftiGunzipBytes,
+  // NIfTI header viewer 用
+  getNiftiHeaderForSeries: (idx: number) => {
+    if (idx < 0 || idx >= seriesList.length) return null;
+    const v = seriesList[idx]?.volume;
+    if (!v?.metadata) return null;
+    return {
+      header: v.metadata.niftiHeader ?? null,
+      filename: v.metadata.sourceFilename ?? null,
+      modality: v.metadata.modality,
+      seriesUID: v.metadata.seriesUID,
+      datatypeName: v.metadata.datatypeName,
+      dims: { nx: v.nx, ny: v.ny, nz: v.nz },
+    };
+  },
   // Tracer preset
   applyTracerPreset,
   applyTracerById,
@@ -4265,6 +4475,8 @@ defineExpose({
       @changeSlice="changeSlice_"
       @setModality="onSetSeriesModality"
       @setActiveForSeg="onSetActiveForSeg"
+      @inspectRaw="(p: { index: number }) => inspectNiftiRaw(p.index)"
+      @viewHeader="(p: { index: number }) => onViewNiftiHeader(p.index)"
       @phantom1="phantom1"
       @phantom2="phantom2"
       @phantom3="phantom3"
@@ -4416,7 +4628,60 @@ defineExpose({
       </v-card-actions>
     </v-card>
   </v-dialog>
+
+  <!-- NIfTI header viewer dialog (volume card "..." メニュー → "View NIfTI header") -->
+  <v-dialog v-model="niftiHeaderDialog.open" max-width="720">
+    <v-card>
+      <v-card-title class="d-flex align-center" style="gap: 8px;">
+        <v-icon icon="mdi-format-list-bulleted-type" size="small" />
+        <span>NIfTI header</span>
+        <span class="text-caption text-disabled" style="font-family: 'JetBrains Mono', monospace; margin-left: 4px;">
+          {{ niftiHeaderDialog.filename }}
+        </span>
+        <v-spacer />
+        <v-btn icon="mdi-close" variant="text" size="small" @click="niftiHeaderDialog.open = false" />
+      </v-card-title>
+      <v-card-text style="max-height: 70vh; overflow: auto;">
+        <div class="text-caption text-disabled mb-2">
+          modality: <b>{{ niftiHeaderDialog.modality }}</b>
+          · datatype: <b>{{ niftiHeaderDialog.datatypeName }}</b>
+          · series UID: <span style="font-family: 'JetBrains Mono', monospace;">{{ niftiHeaderDialog.seriesUID }}</span>
+        </div>
+        <table class="mv-nifti-hdr-table">
+          <tbody>
+            <tr v-for="r in niftiHeaderDialog.rows" :key="r.key">
+              <td class="key">{{ r.key }}</td>
+              <td class="val">{{ r.value }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </v-card-text>
+    </v-card>
+  </v-dialog>
 </template>
+
+<style scoped>
+.mv-nifti-hdr-table {
+  width: 100%;
+  font-size: 12px;
+  border-collapse: collapse;
+}
+.mv-nifti-hdr-table td {
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--mv-border);
+  vertical-align: top;
+}
+.mv-nifti-hdr-table td.key {
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  color: var(--mv-text-muted);
+  width: 28%;
+  white-space: nowrap;
+}
+.mv-nifti-hdr-table td.val {
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  word-break: break-all;
+}
+</style>
 
 <style scoped>
 .mv-tile-grid {

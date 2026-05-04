@@ -132,13 +132,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   rgb = rgb + ovlColor * ovlW;
 
   // ===== mask overlay (label color) =====
+  // Voxel center 規約 = 整数座標 (floor + 0.5 で nearest center 選択)
   if (P.outAndFlags.z == 1) {
     let mvx = P.p00m.x + cyf * P.v01m.x + cxf * P.v10m.x;
     let mvy = P.p00m.y + cyf * P.v01m.y + cxf * P.v10m.y;
     let mvz = P.p00m.z + cyf * P.v01m.z + cxf * P.v10m.z;
-    let mx = i32(floor(mvx));
-    let my = i32(floor(mvy));
-    let mz = i32(floor(mvz));
+    let mx = i32(floor(mvx + 0.5));
+    let my = i32(floor(mvy + 0.5));
+    let mz = i32(floor(mvz + 0.5));
     if (mx >= 0 && mx < P.maskDims.x && my >= 0 && my < P.maskDims.y && mz >= 0 && mz < P.maskDims.z) {
       let lid = textureLoad(maskTex, vec3<i32>(mx, my, mz), 0).r;
       if (lid > 0u) {

@@ -41,6 +41,8 @@ const props = defineProps<{
 const emit = defineEmits<{
     (e: 'setModality', payload: { index: number; modality: 'PT' | 'CT' | 'MR' }): void;
     (e: 'setActiveForSeg', payload: { index: number; modality: 'PT' | 'CT' }): void;
+    (e: 'inspectRaw', payload: { index: number }): void;
+    (e: 'viewHeader', payload: { index: number }): void;
 }>();
 
 // Drag start: custom mime に series index を載せる。
@@ -160,6 +162,45 @@ const sliceLabelFor = (s: { index: number }): string | null => {
             @dragstart="(e: DragEvent) => onCardDragStart(e, s.index)"
             :title="'Drag this card onto an image box to load this series'"
         >
+            <!-- ... メニュー: NIfTI raw bytes 表示 / NIfTI header 表示。
+                 sourceType=NIFTI のときだけ NIfTI 系項目を表示。 -->
+            <v-menu location="bottom end">
+                <template v-slot:activator="{ props: act }">
+                    <button
+                        v-bind="act"
+                        class="card-menu-btn"
+                        title="More options"
+                        @click.stop
+                        @mousedown.stop
+                    >
+                        <v-icon icon="mdi-dots-horizontal" size="x-small" />
+                    </button>
+                </template>
+                <v-list density="compact">
+                    <v-list-item
+                        v-if="s.sourceType === 'NIFTI'"
+                        @click="emit('viewHeader', { index: s.index })"
+                    >
+                        <template v-slot:prepend>
+                            <v-icon icon="mdi-format-list-bulleted-type" size="small" />
+                        </template>
+                        <v-list-item-title>View NIfTI header</v-list-item-title>
+                    </v-list-item>
+                    <v-list-item
+                        v-if="s.sourceType === 'NIFTI' && s.hasVolume"
+                        @click="emit('inspectRaw', { index: s.index })"
+                    >
+                        <template v-slot:prepend>
+                            <v-icon icon="mdi-database-search-outline" size="small" />
+                        </template>
+                        <v-list-item-title>Inspect raw bytes</v-list-item-title>
+                        <v-list-item-subtitle>Bypass affine — show storage order</v-list-item-subtitle>
+                    </v-list-item>
+                    <v-list-item v-if="s.sourceType === 'DICOM'" disabled>
+                        <v-list-item-title class="text-caption text-disabled">No actions for DICOM</v-list-item-title>
+                    </v-list-item>
+                </v-list>
+            </v-menu>
             <div
                 class="thumb"
                 @wheel="(e: WheelEvent) => onThumbWheel(e, s.index)"
@@ -300,6 +341,33 @@ const sliceLabelFor = (s: { index: number }): string | null => {
     cursor: grab;
     border: 1px solid transparent;
     transition: border-color 0.15s, background 0.15s;
+    position: relative;       /* card-menu-btn の絶対位置 anchor */
+}
+.card-menu-btn {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: rgba(0, 0, 0, 0.35);
+    color: var(--mv-text-muted);
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.12s, background 0.12s, color 0.12s;
+    z-index: 2;
+}
+.series-card:hover .card-menu-btn {
+    opacity: 0.85;
+}
+.card-menu-btn:hover {
+    background: rgba(0, 212, 170, 0.20);
+    color: var(--mv-accent);
+    opacity: 1 !important;
 }
 .series-card:active {
     cursor: grabbing;

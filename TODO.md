@@ -188,6 +188,22 @@ UI 案: NIfTI series card のメニュー or ☰ から "Inspect NIfTI bytes" �
 ONNX 化のハードルが高く、ユーザ判断で中止。`segmentation/medSam.ts` / `aiRoi` toolbar entry / `onnxruntime-web` 依存はすべて削除済。
 代替案 (smart click region growing 等) も別途検討中だが現時点では未着手。
 
+### GPU MI + rigid registration (将来課題, 2026-05-04 棚上げ)
+
+現状 `src/components/registration/` は純 JS 単一スレッド。MI 計算 (32-bin joint histogram × 8000 sample × 数百 iter × 3 level) で 5-30 秒 main thread block。
+
+**設計案** (実装時の参考):
+- WebGPU compute shader で MI 評価を 1 dispatch 化
+  - bind: PT 3D tex, MR 3D tex, sample point buffer, fixed/moving min/max uniform, rigid params uniform
+  - thread per sample: trilinear sample 両方 → bin index → atomic add into joint histogram (storage buffer)
+  - 戻りで joint histogram を CPU に readback → MI 計算 (これは軽い)
+- 期待: 5-30 s → 0.1-1 s、main thread freeze 完全解消
+- 既存 webgpu/gpuContext / volumeCache を流用可
+- 工数 10-15h
+
+セット候補: WebGPU MI + abort UI (1h) + 手動 nudge UI (3-5h)。合計 14-21h。
+現状ユーザ需要は低いので保留。
+
 ### Dosimetry (single-timepoint simplified, 次セッション)
 ユーザ確認済: single-timepoint approximation (6-10h)。
 

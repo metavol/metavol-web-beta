@@ -41,6 +41,8 @@ const emit = defineEmits([
   "redraw",
   "setModality",
   "setActiveForSeg",
+  "inspectRaw",
+  "viewHeader",
 ]);
 
 // 最後にクリックした preset を track して active 表示。
@@ -140,6 +142,8 @@ const onPetUnitChange = (v: 'SUV' | 'BqMl' | null | undefined) => {
         :series="seriesSummaries ?? []"
         @setModality="(p: { index: number; modality: 'PT' | 'CT' | 'MR' }) => emit('setModality', p)"
         @setActiveForSeg="(p: { index: number; modality: 'PT' | 'CT' }) => emit('setActiveForSeg', p)"
+        @inspectRaw="(p: { index: number }) => emit('inspectRaw', p)"
+        @viewHeader="(p: { index: number }) => emit('viewHeader', p)"
       />
     </section>
 
