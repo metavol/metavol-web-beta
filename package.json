@@ -4,7 +4,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "parity": "node scripts/parity-check.mjs"
   },
   "dependencies": {
     "@mdi/font": "6.2.95",
@@ -14,7 +15,6 @@
     "dicom-parser": "^1.8.21",
     "jpeg-lossless-decoder-js": "^2.1.2",
     "nifti-reader-js": "^0.6.8",
-    "onnxruntime-web": "^1.25.1",
     "pinia": "^3.0.4",
     "roboto-fontface": "*",
     "three": "^0.164.1",
@@ -25,6 +25,7 @@
     "@babel/types": "^7.24.0",
     "@types/node": "^20.11.25",
     "@vitejs/plugin-vue": "^5.0.4",
+    "playwright": "^1.59.1",
     "sass": "^1.71.1",
     "typescript": "^5.4.2",
     "unplugin-fonts": "^1.1.1",

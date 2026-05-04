@@ -58,6 +58,7 @@ const gunzipAsync = (data: Uint8Array): Promise<Uint8Array> =>
     });
 import * as Phantom from './phantom.ts';
 import { useSegmentationStore } from '../stores/segmentation';
+import { usePerfStore } from '../stores/perf';
 import { sphereStatsInPet, fillPolygonOnSlice, findMaximumAxis as maxAxis } from './segmentation/maskOps';
 import { TRACER_PRESETS, tracerById, detectTracer, type TracerPreset } from './tracerPresets';
 import SegmentationPanel from './SegmentationPanel.vue';
@@ -200,11 +201,154 @@ const applyAutoFit = () => {
 //                     CORS 必須: ホスト側で Access-Control-Allow-Origin を返すこと
 // Ctrl+Shift+D で voxel inspector を toggle
 onMounted(() => {
+  // Parity test 用 window globals: Playwright や DevTools console から叩ける。
+  // - isReady(): 全ボックスが描画準備完了か
+  // - setMode(m): renderer mode を強制 + 全 box redraw
+  // - getBoxes(): 各 box の canvas (HTMLCanvasElement) と種別
+  // - waitForIdle(ms): 全ての非同期 draw が落ち着くまで待つ
+  // - parityCheck(): cpu / gpu を順に切り替えてピクセル diff を計測 → 結果オブジェクトを返す
+  (window as any).__metavolTest = {
+    isReady: () => imb.value != null && imb.value.length > 0 && imageBoxInfos.value.length > 0,
+    setMode: (m: 'auto' | 'cpu' | 'gpu') => {
+      usePerfStore().setMode(m);
+      show();
+    },
+    getBoxes: () => {
+      const out: Array<{ id: number; kind: string; plane: string; canvas: HTMLCanvasElement | null }> = [];
+      if (!imb.value) return out;
+      // imb.value[i].cv1 は Vue の auto-unwrap で canvas 要素 (HTMLCanvasElement) が直接得られる。
+      // ただし fallback として DOM から `.drop_area canvas` を直接拾う経路も持つ。
+      const domCanvases = Array.from(document.querySelectorAll<HTMLCanvasElement>('.drop_area canvas'));
+      for (let i = 0; i < imb.value.length; i++) {
+        const box = imb.value[i] as any;
+        let canvas: HTMLCanvasElement | null = null;
+        const cv1 = box?.cv1;
+        if (cv1) {
+          canvas = (cv1.value ?? cv1) as HTMLCanvasElement;
+          if (!(canvas instanceof HTMLCanvasElement)) canvas = null;
+        }
+        if (!canvas && domCanvases[i]) canvas = domCanvases[i];
+        out.push({
+          id: i,
+          kind: getBoxKind(i),
+          plane: getBoxCurrentPlane(i) ?? '?',
+          canvas,
+        });
+      }
+      return out;
+    },
+    waitForIdle: (ms: number = 800) => new Promise(r => setTimeout(r, ms)),
+    perfStats: () => {
+      const ps = usePerfStore();
+      const out: Record<string, any> = { mode: ps.rendererMode, samples: {} };
+      for (const [k, v] of Object.entries(ps.samples)) {
+        const cpus = (v as any).cpu.map((s: any) => s.ms);
+        const gpus = (v as any).gpu.map((s: any) => s.ms);
+        const med = (a: number[]) => {
+          if (a.length === 0) return null;
+          const s = [...a].sort((x, y) => x - y);
+          return s[Math.floor(s.length / 2)];
+        };
+        out.samples[k] = {
+          cpuN: cpus.length, gpuN: gpus.length,
+          cpuMed: med(cpus), gpuMed: med(gpus),
+          cpuMin: cpus.length ? Math.min(...cpus) : null,
+          gpuMin: gpus.length ? Math.min(...gpus) : null,
+        };
+      }
+      return out;
+    },
+    parityCheck: async (waitMs: number = 800) => {
+      const helper = (window as any).__metavolTest;
+      const t0 = performance.now();
+      // 1) CPU 描画 → snapshot
+      helper.setMode('cpu');
+      await helper.waitForIdle(waitMs);
+      const cpuShots: Array<{ id: number; kind: string; plane: string; w: number; h: number; data: Uint8ClampedArray | null }> = [];
+      for (const b of helper.getBoxes()) {
+        if (b.canvas) {
+          const ctx = b.canvas.getContext('2d');
+          const img = ctx?.getImageData(0, 0, b.canvas.width, b.canvas.height);
+          cpuShots.push({ id: b.id, kind: b.kind, plane: b.plane, w: b.canvas.width, h: b.canvas.height, data: img?.data ?? null });
+        } else {
+          cpuShots.push({ id: b.id, kind: b.kind, plane: b.plane, w: 0, h: 0, data: null });
+        }
+      }
+      // 2) GPU 描画 → snapshot
+      helper.setMode('gpu');
+      await helper.waitForIdle(waitMs);
+      const gpuShots: typeof cpuShots = [];
+      for (const b of helper.getBoxes()) {
+        if (b.canvas) {
+          const ctx = b.canvas.getContext('2d');
+          const img = ctx?.getImageData(0, 0, b.canvas.width, b.canvas.height);
+          gpuShots.push({ id: b.id, kind: b.kind, plane: b.plane, w: b.canvas.width, h: b.canvas.height, data: img?.data ?? null });
+        } else {
+          gpuShots.push({ id: b.id, kind: b.kind, plane: b.plane, w: 0, h: 0, data: null });
+        }
+      }
+      // 3) Diff 計算
+      const results = [];
+      for (let i = 0; i < cpuShots.length; i++) {
+        const c = cpuShots[i];
+        const g = gpuShots[i];
+        if (!c.data || !g.data || c.w !== g.w || c.h !== g.h) {
+          results.push({ id: c.id, kind: c.kind, plane: c.plane, w: c.w, h: c.h, status: 'no-data', maxDiff: -1, mismatchRatio: -1 });
+          continue;
+        }
+        let maxDiff = 0;
+        let mismatched = 0;
+        const total = c.w * c.h;
+        const cd = c.data, gd = g.data;
+        for (let p = 0; p < total; p++) {
+          const off = p * 4;
+          const d0 = Math.abs(cd[off] - gd[off]);
+          const d1 = Math.abs(cd[off + 1] - gd[off + 1]);
+          const d2 = Math.abs(cd[off + 2] - gd[off + 2]);
+          const m = Math.max(d0, d1, d2);
+          if (m > maxDiff) maxDiff = m;
+          if (m > 4) mismatched++;
+        }
+        results.push({
+          id: c.id, kind: c.kind, plane: c.plane, w: c.w, h: c.h,
+          status: 'ok', maxDiff, mismatchRatio: mismatched / total,
+        });
+      }
+      // 元の mode に戻す (Auto)
+      helper.setMode('auto');
+      return { elapsedMs: performance.now() - t0, boxes: results };
+    },
+  };
+  console.log('[parity] window.__metavolTest exposed');
+
   try {
     const p = new URLSearchParams(window.location.search);
     if (p.get('debug') === '1') debugMode.value = true;
     const devCase = p.get('dev');
     if (devCase) loadDevCase(devCase);
+    // ?test=parity: multiplebonemets を auto load + PET Standard layout を組む
+    if (p.get('test') === 'parity') {
+      // ロード→自動レイアウトが終わってから PET Standard を強制起動。
+      // loadFiles 内 isLoading=false のタイミングを watch、その後 setupPetStandardView。
+      const stopWatch = watch(isLoading, async (v) => {
+        if (v === false) {
+          stopWatch();
+          await nextTick();
+          const list = seriesSummaries.value;
+          const hasPt = list.some(s => s.modality === 'PT' || s.modality === 'PET');
+          const hasCt = list.some(s => s.modality === 'CT');
+          if (hasPt && hasCt) {
+            tileN.value = 4;
+            await nextTick();
+            await setupPetStandardView();
+            console.log('[parity] PET Standard setup complete');
+          } else {
+            console.warn('[parity] PT or CT missing — cannot setup PET Standard');
+          }
+        }
+      });
+      loadDevCase('multiplebonemets');
+    }
     // 外部 URL ロード (公開デモ / リンク共有用)
     const urlParams = p.getAll('url');
     if (urlParams.length > 0) {
@@ -941,16 +1085,29 @@ const setPlaneOnBox = (i: number, plane: 'axi' | 'cor' | 'sag' | 'mip' | 'smip' 
     } else {
       d.mip.isSurface = (plane === 'smip');
     }
+    // MIP / VR 用 coronal-like reorient: canvas y = head-foot (vecy = volume vecZ),
+    // 投影軸 = vecz = volume vecY (anterior-posterior)。これで MIP の正面像が出る。
+    const vol = seriesList[d.currentSeriesNumber]?.volume;
+    if (vol) {
+      d.vecx = vol.vectorX.clone();
+      d.vecy = headUpVecy(vol.vectorZ.clone().normalize().multiplyScalar(vol.vectorX.length()));
+      d.vecz = vol.vectorY.clone();
+    }
     showImage(i);
     return;
   }
 
   if (plane === 'vr') {
-    // VR: MIP と同じ rotation 機構を使うため mip オブジェクト (angle) は流用
     d.isMip = false;
     d.isVr = true;
     if (d.mip == null) {
       d.mip = { mipAngle: 0, isSurface: false, thresholdSurfaceMip: 0.3, depthSurfaceMip: 3 };
+    }
+    const vol = seriesList[d.currentSeriesNumber]?.volume;
+    if (vol) {
+      d.vecx = vol.vectorX.clone();
+      d.vecy = headUpVecy(vol.vectorZ.clone().normalize().multiplyScalar(vol.vectorX.length()));
+      d.vecz = vol.vectorY.clone();
     }
     showImage(i);
     return;
@@ -1730,60 +1887,8 @@ const imageBoxClicked = (e:MouseEvent) => {
     handlePolygonClick(e);
   } else if (leftButtonFunction.value === "assignLabel") {
     handleAssignLabelClick(e);
-  } else if (leftButtonFunction.value === "aiRoi") {
-    handleAiRoiClick(e);
   }
 }
-
-// LiteMedSAM (browser ONNX, WebGPU) で click 周辺の lesion を auto segment。
-// Phase 1: WebGPU detect + skeleton call。Phase 2 で実 ONNX 接続後 active 化。
-let medSamBusy = false;
-const handleAiRoiClick = async (e: MouseEvent) => {
-  if (medSamBusy) return;
-  const id = getIdOfEventOccured(e);
-  if (!isVolumeImageBoxInfo(id)) {
-    alert('AI ROI works only on Volume / Fusion boxes (with PET as the active series).');
-    return;
-  }
-  if (!segStore.petVolumeRef) {
-    alert('AI ROI requires a PT volume to be loaded.');
-    return;
-  }
-  // Lazy import to keep main bundle slim
-  const ms = await import('./segmentation/medSam');
-  if (!ms.isWebGpuAvailable()) {
-    alert(
-      'AI ROI requires WebGPU support.\n\n' +
-      'Use Chrome 113+, Edge, or Safari 17.4+ on a system with a compatible GPU.\n' +
-      'Firefox stable does not yet support WebGPU.'
-    );
-    return;
-  }
-
-  const [cx, cy] = getCanvasXY(e);
-  const canvas = imb.value?.[id]?.cv1.value as HTMLCanvasElement | undefined;
-  if (!canvas) return;
-
-  medSamBusy = true;
-  try {
-    const t0 = performance.now();
-    const mask2d = await ms.segmentSingleClick(canvas, cx, cy);
-    const t1 = performance.now();
-    if (!mask2d) {
-      console.warn('[aiRoi] no mask returned');
-      return;
-    }
-    // mask2d は canvas size の binary。PET grid に投影して manualEdits に書き込み (Phase 2 で polygon と同じ転写ロジックを共有)
-    console.log(`[aiRoi] click (${cx.toFixed(0)}, ${cy.toFixed(0)}) → mask in ${(t1 - t0).toFixed(0)}ms`);
-    // TODO: Phase 2 で screen→world→PET voxel 投影 + segStore.manualEdits 書込み + show()
-    alert(`Phase 1 (skeleton) — model not yet wired.\nGot ${mask2d.length} mask pixels in ${(t1 - t0).toFixed(0)}ms.`);
-  } catch (err: any) {
-    console.error('[aiRoi]', err);
-    alert(`AI ROI failed: ${err?.message ?? err}`);
-  } finally {
-    medSamBusy = false;
-  }
-};
 
 const handleAssignLabelClick = (e: MouseEvent) => {
   const id = getIdOfEventOccured(e);
@@ -2582,7 +2687,12 @@ const loadNii = async (arraybuffer: ArrayBuffer, filename?: string) => {
     // 既に Float32 ならそのまま、それ以外はコピー変換。
     const float32 = (typed instanceof Float32Array) ? typed : Float32Array.from(typed as ArrayLike<number>);
     bagOfFiles.push({ niftiHeader: hdr, pixelData: float32, filename, datatypeName });
+    return;
   }
+  // 不正 NIfTI / JSON 等: caller の catch に流して placeholder push させ poll を進める。
+  // loadNii が「無 push で resolve」してしまうと bagOfFiles.length が永遠に
+  // localFileList.length に届かず、初回ロードが完了しないバグになる。
+  throw new Error(`not a valid NIfTI: ${filename ?? '?'}`);
 }
 
 // NIfTI のみのロード時、ファイル名から modality を推定する。
@@ -2787,14 +2897,31 @@ const showImage = (i:number) => {
       ? segStore.ctBodyMask
       : undefined;
     // Fusion view ではマスク overlay を描かない（要望により）。
-    imb.value![i].drawNiftiSliceFusion(
-      pixelData0, nx0,ny0,nz0, wc0!, ww0!, p00_0,v01_0,v10_0,clut0,
-      pixelData1, nx1,ny1,nz1, wc1!, ww1!, p00_1,v01_1,v10_1,clut1,
-      undefined,
-      fusionCtBodyMask,
-      info.overlayAlpha ?? 0.5,
-    );
-
+    if (info.isVr) {
+      // Fusion VR: CT VR + PET VR を α blend
+      const angle = info.mip?.mipAngle ?? 0;
+      imb.value![i].drawFusionVR(
+        pixelData0, nx0,ny0,nz0, wc0!, ww0!, p00_0,v01_0,v10_0,clut0,
+        pixelData1, nx1,ny1,nz1, wc1!, ww1!, p00_1,v01_1,v10_1,clut1,
+        angle, info.overlayAlpha ?? 0.5,
+      );
+    } else if (info.isMip) {
+      // Fusion MIP: CT base MIP + PET overlay MIP を α blend
+      const angle = info.mip?.mipAngle ?? 0;
+      imb.value![i].drawFusionMip(
+        pixelData0, nx0,ny0,nz0, wc0!, ww0!, p00_0,v01_0,v10_0,clut0,
+        pixelData1, nx1,ny1,nz1, wc1!, ww1!, p00_1,v01_1,v10_1,clut1,
+        angle, info.overlayAlpha ?? 0.5,
+      );
+    } else {
+      imb.value![i].drawNiftiSliceFusion(
+        pixelData0, nx0,ny0,nz0, wc0!, ww0!, p00_0,v01_0,v10_0,clut0,
+        pixelData1, nx1,ny1,nz1, wc1!, ww1!, p00_1,v01_1,v10_1,clut1,
+        undefined,
+        fusionCtBodyMask,
+        info.overlayAlpha ?? 0.5,
+      );
+    }
   }
 
   drawAnnotationOverlays(i);
@@ -2939,6 +3066,7 @@ const buildMipMaskOverlay = (boxId?: number) => {
     nx: pet.nx, ny: pet.ny, nz: pet.nz,
     labelClut,
     alpha: segStore.overlayAlpha,
+    version: segStore.maskVersion,
   };
 };
 

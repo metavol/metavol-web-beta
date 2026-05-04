@@ -442,6 +442,70 @@
         <v-tooltip activator="parent" location="bottom">{{ drawerRight ? 'Hide inspector' : 'Show inspector' }}</v-tooltip>
       </v-btn>
 
+      <v-divider vertical class="mx-1" />
+
+      <!-- Renderer (CPU/GPU) トグル + perf 集計表示 -->
+      <v-menu :close-on-content-click="false">
+        <template v-slot:activator="{ props: act }">
+          <v-btn class="mv-tool-btn mv-tool-btn--wide" variant="text" size="small" v-bind="act">
+            <v-icon :icon="rendererModeIcon" />
+            <span class="mv-tool-label">{{ rendererModeLabel }}</span>
+            <v-tooltip activator="parent" location="bottom">Renderer (CPU/GPU) and perf stats</v-tooltip>
+          </v-btn>
+        </template>
+        <v-list density="compact" min-width="280">
+          <v-list-subheader>Renderer mode</v-list-subheader>
+          <v-list-item
+            :active="perfStore.rendererMode === 'auto'"
+            @click="setRendererMode('auto')"
+          >
+            <template v-slot:prepend>
+              <v-icon icon="mdi-auto-fix" size="small" />
+            </template>
+            <v-list-item-title>Auto (GPU if available)</v-list-item-title>
+          </v-list-item>
+          <v-list-item
+            :active="perfStore.rendererMode === 'cpu'"
+            @click="setRendererMode('cpu')"
+          >
+            <template v-slot:prepend>
+              <v-icon icon="mdi-cpu-64-bit" size="small" />
+            </template>
+            <v-list-item-title>Force CPU</v-list-item-title>
+          </v-list-item>
+          <v-list-item
+            :active="perfStore.rendererMode === 'gpu'"
+            @click="setRendererMode('gpu')"
+          >
+            <template v-slot:prepend>
+              <v-icon icon="mdi-expansion-card-variant" size="small" />
+            </template>
+            <v-list-item-title>Force GPU (no fallback)</v-list-item-title>
+          </v-list-item>
+
+          <v-divider class="my-1" />
+          <v-list-subheader>Median (last 30)</v-list-subheader>
+          <v-list-item density="compact" class="mv-perf-row">
+            <div class="mv-perf-grid">
+              <div class="mv-perf-cell mv-perf-h">kind</div>
+              <div class="mv-perf-cell mv-perf-h">CPU</div>
+              <div class="mv-perf-cell mv-perf-h">GPU</div>
+              <template v-for="r in perfKinds" :key="r.kind">
+                <div class="mv-perf-cell">{{ r.label }}</div>
+                <div class="mv-perf-cell mv-perf-num">{{ perfRow(r.kind).cpu }}</div>
+                <div class="mv-perf-cell mv-perf-num">{{ perfRow(r.kind).gpu }}</div>
+              </template>
+            </div>
+          </v-list-item>
+          <v-list-item @click="perfStore.clearSamples">
+            <template v-slot:prepend>
+              <v-icon icon="mdi-restart" size="small" />
+            </template>
+            <v-list-item-title>Clear stats</v-list-item-title>
+          </v-list-item>
+        </v-list>
+      </v-menu>
+
       <v-btn
         class="mv-tool-btn"
         variant="text"
@@ -533,6 +597,41 @@ onMounted(() => {
 
 const segStore = useSegmentationStore();
 
+// Renderer mode (Auto / Force CPU / Force GPU) + perf 集計表示
+import { usePerfStore, type RendererMode, type DrawKind } from '@/stores/perf';
+const perfStore = usePerfStore();
+const setRendererMode = (m: RendererMode) => {
+  perfStore.setMode(m);
+  redraw();   // 全 box 再描画 (新 mode で)
+};
+const rendererModeLabel = computed(() => {
+  if (perfStore.rendererMode === 'cpu') return 'CPU';
+  if (perfStore.rendererMode === 'gpu') return 'GPU';
+  return 'Auto';
+});
+const rendererModeIcon = computed(() => {
+  if (perfStore.rendererMode === 'cpu') return 'mdi-cpu-64-bit';
+  if (perfStore.rendererMode === 'gpu') return 'mdi-expansion-card-variant';
+  return 'mdi-auto-fix';
+});
+const perfKinds: { kind: DrawKind; label: string }[] = [
+  { kind: 'mpr',         label: 'MPR' },
+  { kind: 'fusion-mpr',  label: 'Fusion MPR' },
+  { kind: 'mip',         label: 'MIP' },
+  { kind: 'smip',        label: 'sMIP' },
+  { kind: 'vr',          label: 'VR' },
+  { kind: 'mip-multi',   label: 'MIP (multi)' },
+  { kind: 'vr-multi',    label: 'VR (multi)' },
+];
+const perfRow = (kind: DrawKind) => {
+  const cpu = perfStore.median(kind, 'cpu');
+  const gpu = perfStore.median(kind, 'gpu');
+  return {
+    cpu: cpu == null ? '—' : `${cpu.toFixed(1)} ms`,
+    gpu: gpu == null ? '—' : `${gpu.toFixed(1)} ms`,
+  };
+};
+
 // PET Standard ボタンを enable する条件:
 //   (a) PET/CT 両方の Volume が既に MPR 済み、または
 //   (b) DicomView が公開する seriesSummaries に PT と CT の DICOM がある
@@ -566,7 +665,6 @@ const tools = [
   { value: 'page',       icon: 'mdi-arrow-up-down',         label: 'Page' },
   { value: 'sphereROI',  icon: 'mdi-circle-outline',        label: 'Sphere ROI' },
   { value: 'polygonROI', icon: 'mdi-pentagon-outline',      label: 'Polygon ROI' },
-  { value: 'aiRoi',      icon: 'mdi-auto-fix',              label: 'AI ROI (LiteMedSAM, WebGPU)' },
   { value: 'assignLabel',icon: 'mdi-tag-outline',           label: 'Assign Label' },
 ];
 
@@ -889,6 +987,28 @@ const onInspectNiftiRaw = (idx: number) => {
   font-size: 12px;
   font-weight: 600;
   color: var(--mv-text);
+}
+
+/* perf 集計テーブル (Renderer toggle menu 内) */
+.mv-perf-row { padding: 4px 12px !important; }
+.mv-perf-grid {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  column-gap: 14px;
+  row-gap: 2px;
+  font-size: 12px;
+}
+.mv-perf-cell { white-space: nowrap; }
+.mv-perf-h {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: var(--mv-text-muted);
+  border-bottom: 1px solid var(--mv-border);
+  padding-bottom: 2px;
+}
+.mv-perf-num {
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  text-align: right;
 }
 
 .mv-tracer-sub {

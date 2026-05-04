@@ -8,6 +8,15 @@
 
 import { ref, onMounted} from 'vue';
 import * as THREE from 'three';
+import { isWebGpuAvailable } from './webgpu/gpuContext';
+import { gpuRenderMip } from './webgpu/mipPipeline';
+import { gpuRenderVr } from './webgpu/vrPipeline';
+import { gpuRenderSlice } from './webgpu/slicePipeline';
+import { gpuRenderFusion } from './webgpu/fusionPipeline';
+import { gpuRenderFusionMip } from './webgpu/fusionMipPipeline';
+import { gpuRenderFusionVr } from './webgpu/fusionVrPipeline';
+import { usePerfStore } from '../stores/perf';
+const perfStore = usePerfStore();
 
 
 interface ClutLegendProp {
@@ -297,6 +306,9 @@ export interface MaskOverlay {
   nx: number; ny: number; nz: number;
   labelClut: number[][];
   alpha: number;
+  // segStore.maskVersion — GPU mask texture cache の invalidation key。
+  // mask Uint16Array は recompute で in-place 書換されるため、参照同一性だけでは差分検出できない。
+  version?: number;
 }
 
 const drawNiftiSlice = async function(pix: Float32Array | Int16Array,
@@ -306,9 +318,58 @@ const drawNiftiSlice = async function(pix: Float32Array | Int16Array,
     bodyMask?: Uint8Array) {     // CT 寝台除去用 body mask (0=体外, 1=体内)
 
       if (cv1.value === null || ctx === null) return;
-      isEmpty.value = false;
       const canvasx = cv1.value.width;
       const canvasy = cv1.value.height;
+
+      // ====== WebGPU fast path (Step 4) ======
+      const t0 = performance.now();
+      if (perfStore.gpuAllowed && isWebGpuAvailable()) {
+        try {
+          const gpuOff = await gpuRenderSlice({
+            voxel: pix, nx, ny, nz,
+            outW: canvasx, outH: canvasy,
+            p00: { x: p00.x, y: p00.y, z: p00.z },
+            v01: { x: v01.x, y: v01.y, z: v01.z },
+            v10: { x: v10.x, y: v10.y, z: v10.z },
+            wc, ww, clut,
+            overlay: overlay ? {
+              mask: overlay.mask,
+              version: overlay.version ?? 0,
+              nx: overlay.nx, ny: overlay.ny, nz: overlay.nz,
+              p00: { x: overlay.p00.x, y: overlay.p00.y, z: overlay.p00.z },
+              v01: { x: overlay.v01.x, y: overlay.v01.y, z: overlay.v01.z },
+              v10: { x: overlay.v10.x, y: overlay.v10.y, z: overlay.v10.z },
+              labelClut: overlay.labelClut,
+              alpha: overlay.alpha,
+            } : undefined,
+            bodyMask,
+            targetCanvas: cv1.value,
+          });
+          if (gpuOff) {
+            isEmpty.value = false;
+            ctx.drawImage(gpuOff as any, 0, 0);
+            perfStore.record('mpr', 'gpu', performance.now() - t0);
+            return;
+          }
+        } catch (err) {
+          console.warn('[gpu] slice failed:', err);
+          if (!perfStore.cpuFallbackAllowed) {
+            ctx.fillStyle = '#ff0000';
+            ctx.fillRect(0, 0, canvasx, canvasy);
+            isEmpty.value = false;
+            return;
+          }
+        }
+      }
+      if (!perfStore.cpuFallbackAllowed) {
+        console.warn('[slice] CPU fallback blocked by rendererMode=gpu — filling sentinel');
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(0, 0, canvasx, canvasy);
+        isEmpty.value = false;
+        return;
+      }
+
+      isEmpty.value = false;
       const myImageData = ctx.getImageData(0,0,canvasx,canvasy); // メモリーを新たに確保しないので、createImageDataよりも有利だと思う（想像）
       let ad = 0;
 
@@ -361,6 +422,7 @@ const drawNiftiSlice = async function(pix: Float32Array | Int16Array,
       }
 
   ctx.putImageData(myImageData, 0,0,0,0,canvasx, canvasy);
+  perfStore.record('mpr', 'cpu', performance.now() - t0);
 }
 
 const drawNiftiSliceFusion = async function(pix0: Float32Array | Int16Array,
@@ -375,9 +437,64 @@ const drawNiftiSliceFusion = async function(pix0: Float32Array | Int16Array,
   ) {
 
       if (cv1.value === null || ctx === null) return;
-      isEmpty.value = false;
       const canvasx = cv1.value.width;
       const canvasy = cv1.value.height;
+
+      // ====== WebGPU fast path (Step 5) ======
+      const t0 = performance.now();
+      if (perfStore.gpuAllowed && isWebGpuAvailable()) {
+        try {
+          const gpuOff = await gpuRenderFusion({
+            voxel0: pix0, nx0, ny0, nz0,
+            p00_0: { x: p00_0.x, y: p00_0.y, z: p00_0.z },
+            v01_0: { x: v01_0.x, y: v01_0.y, z: v01_0.z },
+            v10_0: { x: v10_0.x, y: v10_0.y, z: v10_0.z },
+            wc0, ww0, clut0,
+            voxel1: pix1, nx1, ny1, nz1,
+            p00_1: { x: p00_1.x, y: p00_1.y, z: p00_1.z },
+            v01_1: { x: v01_1.x, y: v01_1.y, z: v01_1.z },
+            v10_1: { x: v10_1.x, y: v10_1.y, z: v10_1.z },
+            wc1, ww1, clut1,
+            outW: canvasx, outH: canvasy,
+            overlayBlend: alpha,
+            overlay: overlay ? {
+              mask: overlay.mask,
+              version: overlay.version ?? 0,
+              nx: overlay.nx, ny: overlay.ny, nz: overlay.nz,
+              p00: { x: overlay.p00.x, y: overlay.p00.y, z: overlay.p00.z },
+              v01: { x: overlay.v01.x, y: overlay.v01.y, z: overlay.v01.z },
+              v10: { x: overlay.v10.x, y: overlay.v10.y, z: overlay.v10.z },
+              labelClut: overlay.labelClut,
+              alpha: overlay.alpha,
+            } : undefined,
+            bodyMask,
+            targetCanvas: cv1.value,
+          });
+          if (gpuOff) {
+            isEmpty.value = false;
+            ctx.drawImage(gpuOff as any, 0, 0);
+            perfStore.record('fusion-mpr', 'gpu', performance.now() - t0);
+            return;
+          }
+        } catch (err) {
+          console.warn('[gpu] fusion-slice failed:', err);
+          if (!perfStore.cpuFallbackAllowed) {
+            ctx.fillStyle = '#ff0000';
+            ctx.fillRect(0, 0, canvasx, canvasy);
+            isEmpty.value = false;
+            return;
+          }
+        }
+      }
+      if (!perfStore.cpuFallbackAllowed) {
+        console.warn('[fusion-slice] CPU fallback blocked by rendererMode=gpu — filling sentinel');
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(0, 0, canvasx, canvasy);
+        isEmpty.value = false;
+        return;
+      }
+
+      isEmpty.value = false;
       const myImageData = ctx.getImageData(0,0,canvasx,canvasy); // メモリーを新たに確保しないので、createImageDataよりも有利だと思う（想像）
       let ad = 0;
       const baseW = 1 - alpha;
@@ -447,6 +564,7 @@ const drawNiftiSliceFusion = async function(pix0: Float32Array | Int16Array,
       }
 
   ctx.putImageData(myImageData, 0,0,0,0,canvasx, canvasy);
+  perfStore.record('fusion-mpr', 'cpu', performance.now() - t0);
 }
 
 // let mipDataSet: Float32Array[] = new Float32Array[];
@@ -461,9 +579,57 @@ const drawNiftiMip = async function(pix: Float32Array | Int16Array,
       const time0 = performance.now();
 
       if (cv1.value === null || ctx === null) return;
-      isEmpty.value = false;
       const canvasx = cv1.value.width;
       const canvasy = cv1.value.height;
+
+      // ====== WebGPU fast path ======
+      // overlay 有無いずれも GPU で対応 (Phase 1.5)。失敗時は CPU 経路へフォールスルー。
+      // ただし rendererMode='gpu' (force GPU) なら CPU には落とさず空描画で return (parity テスト用)。
+      const kind = isSurface ? 'smip' : 'mip';
+      if (perfStore.gpuAllowed && isWebGpuAvailable()) {
+        try {
+          const gpuOff = await gpuRenderMip({
+            voxel: pix, nx, ny, nz,
+            outW: canvasx, outH: canvasy,
+            p00: { x: p00.x, y: p00.y, z: p00.z },
+            v01: { x: v01.x, y: v01.y, z: v01.z },
+            v10: { x: v10.x, y: v10.y, z: v10.z },
+            angle, wc, ww,
+            isSurface,
+            surfThresh: thresh, surfDepth: depth,
+            clut,
+            overlay: overlay ? {
+              mask: overlay.mask,
+              version: overlay.version ?? 0,
+              labelClut: overlay.labelClut,
+              alpha: overlay.alpha,
+            } : undefined,
+            targetCanvas: cv1.value,
+          });
+          if (gpuOff) {
+            isEmpty.value = false;
+            ctx.drawImage(gpuOff as any, 0, 0);
+            const ms = performance.now() - time0;
+            perfStore.record(kind, 'gpu', ms);
+            return;
+          }
+        } catch (err) {
+          console.warn('[gpu] MIP failed:', err);
+          if (!perfStore.cpuFallbackAllowed) return;  // mode='gpu': do not fallback
+        }
+      }
+      // mode='gpu' で WebGPU 不可 → 何も描かず return (parity test 用)
+      if (!perfStore.cpuFallbackAllowed) {
+        // mode='gpu' で GPU 不可: parity test が「無描画 → 前 CPU 描画と一致 → 偽 PASS」を起こすので
+        // canvas を sentinel 色 (赤) で塗って明示的に fail を発生させる
+        console.warn('[mip] CPU fallback blocked by rendererMode=gpu — filling sentinel');
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(0, 0, canvasx, canvasy);
+        isEmpty.value = false;
+        return;
+      }
+
+      isEmpty.value = false;
       const myImageData = ctx.getImageData(0,0,canvasx,canvasy);
       let ad = 0;
 
@@ -606,10 +772,142 @@ const drawNiftiMip = async function(pix: Float32Array | Int16Array,
 
   ctx.putImageData(myImageData, 0,0,0,0,canvasx, canvasy);
   const time4 = performance.now();
+  perfStore.record(kind, 'cpu', time4 - time0);
   // console.log(time1-time0, time2-time1, time3-time2, time4-time3);
 
   void isSurface;
 }
+
+// Fusion MIP: drawNiftiMip の 2-volume 版。 PET + CT の MIP を別々に取って α blend。
+// CPU 実装: per canvas pixel で各 volume の slab を独立に決定し、独立に ray-cast (max)。
+// 出力色 = baseW * gray(maxBase) + ovlW * color(maxOvl)。
+// mask overlay は現状の Fusion 仕様 (drawNiftiSliceFusion でも overlay 渡してない) に倣い未対応。
+const drawFusionMip = async function(
+    pix0: Float32Array | Int16Array,
+    nx0:number, ny0:number, nz0:number, wc0:number, ww0:number,
+    p00_0:THREE.Vector3, v01_0:THREE.Vector3, v10_0:THREE.Vector3, clut0: number[][],
+    pix1: Float32Array | Int16Array,
+    nx1:number, ny1:number, nz1:number, wc1:number, ww1:number,
+    p00_1:THREE.Vector3, v01_1:THREE.Vector3, v10_1:THREE.Vector3, clut1: number[][],
+    angle: number, alpha: number = 0.5,
+) {
+    if (cv1.value === null || ctx === null) return;
+    const canvasx = cv1.value.width;
+    const canvasy = cv1.value.height;
+    const t0 = performance.now();
+
+    // ====== WebGPU fast path ======
+    if (perfStore.gpuAllowed && isWebGpuAvailable()) {
+        try {
+            const gpuOff = await gpuRenderFusionMip({
+                voxel0: pix0, nx0, ny0, nz0,
+                p00_0: { x: p00_0.x, y: p00_0.y, z: p00_0.z },
+                v01_0: { x: v01_0.x, y: v01_0.y, z: v01_0.z },
+                v10_0: { x: v10_0.x, y: v10_0.y, z: v10_0.z },
+                wc0, ww0, clut0,
+                voxel1: pix1, nx1, ny1, nz1,
+                p00_1: { x: p00_1.x, y: p00_1.y, z: p00_1.z },
+                v01_1: { x: v01_1.x, y: v01_1.y, z: v01_1.z },
+                v10_1: { x: v10_1.x, y: v10_1.y, z: v10_1.z },
+                wc1, ww1, clut1,
+                outW: canvasx, outH: canvasy,
+                angle, overlayBlend: alpha,
+                targetCanvas: cv1.value,
+            });
+            if (gpuOff) {
+                isEmpty.value = false;
+                ctx.drawImage(gpuOff as any, 0, 0);
+                perfStore.record('mip-multi', 'gpu', performance.now() - t0);
+                return;
+            }
+        } catch (err) {
+            console.warn('[gpu] fusion-mip failed:', err);
+            if (!perfStore.cpuFallbackAllowed) {
+                ctx.fillStyle = '#ff0000'; ctx.fillRect(0, 0, canvasx, canvasy);
+                isEmpty.value = false; return;
+            }
+        }
+    }
+    if (!perfStore.cpuFallbackAllowed) {
+        ctx.fillStyle = '#ff0000'; ctx.fillRect(0, 0, canvasx, canvasy);
+        isEmpty.value = false; return;
+    }
+
+    // CPU fallback
+    isEmpty.value = false;
+    const myImageData = ctx.getImageData(0, 0, canvasx, canvasy);
+    const baseW = 1 - alpha;
+    const ovlW = alpha;
+    const s = Math.sin((angle - 90) * Math.PI / 180);
+    const c = Math.cos((angle - 90) * Math.PI / 180);
+
+    const lo0 = wc0 - ww0 / 2;
+    const lo1 = wc1 - ww1 / 2;
+    const sc0 = 255 / ww0;
+    const sc1 = 255 / ww1;
+
+    let ad = 0;
+    for (let cy = 0; cy < canvasy; cy++) {
+        const v0row = p00_0.clone().addScaledVector(v01_0, cy);
+        const v1row = p00_1.clone().addScaledVector(v01_1, cy);
+        for (let cx = 0; cx < canvasx; cx++) {
+            const v0 = v0row.clone().floor();
+            const v1 = v1row.clone().floor();
+
+            // base (pix0)
+            let baseR = clut0[0][0], baseG = clut0[0][1], baseB = clut0[0][2];
+            if (v0.x >= 0 && v0.x < nx0 && v0.y >= 0 && v0.y < ny0 && v0.z >= 0 && v0.z < nz0) {
+                let m = -Infinity;
+                const j0 = v0.x - ny0 / 2;
+                const k0 = v0.z;
+                for (let ii = nx0 - 1; ii >= 0; ii--) {
+                    const i0 = ii - nx0 / 2;
+                    const x = Math.floor(i0 * c - j0 * s) + nx0 / 2;
+                    const y = Math.floor(i0 * s + j0 * c) + ny0 / 2;
+                    if (x >= 0 && x < nx0 && y >= 0 && y < ny0) {
+                        const a = pix0[k0 * nx0 * ny0 + y * nx0 + x];
+                        if (m < a) m = a;
+                    }
+                }
+                if (m > -Infinity) {
+                    let p = Math.floor((m - lo0) * sc0);
+                    if (p < 0) p = 0; if (p > 255) p = 255;
+                    baseR = clut0[p][0]; baseG = clut0[p][1]; baseB = clut0[p][2];
+                }
+            }
+            // overlay (pix1)
+            let ovlR = clut1[0][0], ovlG = clut1[0][1], ovlB = clut1[0][2];
+            if (v1.x >= 0 && v1.x < nx1 && v1.y >= 0 && v1.y < ny1 && v1.z >= 0 && v1.z < nz1) {
+                let m = -Infinity;
+                const j1 = v1.x - ny1 / 2;
+                const k1 = v1.z;
+                for (let ii = nx1 - 1; ii >= 0; ii--) {
+                    const i0 = ii - nx1 / 2;
+                    const x = Math.floor(i0 * c - j1 * s) + nx1 / 2;
+                    const y = Math.floor(i0 * s + j1 * c) + ny1 / 2;
+                    if (x >= 0 && x < nx1 && y >= 0 && y < ny1) {
+                        const a = pix1[k1 * nx1 * ny1 + y * nx1 + x];
+                        if (m < a) m = a;
+                    }
+                }
+                if (m > -Infinity) {
+                    let p = Math.floor((m - lo1) * sc1);
+                    if (p < 0) p = 0; if (p > 255) p = 255;
+                    ovlR = clut1[p][0]; ovlG = clut1[p][1]; ovlB = clut1[p][2];
+                }
+            }
+            myImageData.data[ad]     = baseR * baseW + ovlR * ovlW;
+            myImageData.data[ad + 1] = baseG * baseW + ovlG * ovlW;
+            myImageData.data[ad + 2] = baseB * baseW + ovlB * ovlW;
+            myImageData.data[ad + 3] = 255;
+            ad += 4;
+            v0row.add(v10_0);
+            v1row.add(v10_1);
+        }
+    }
+    ctx.putImageData(myImageData, 0, 0);
+    perfStore.record('mip-multi', 'cpu', performance.now() - t0);
+};
 
 
 // Volume Rendering (Phase 1): front-to-back ray casting + ramp opacity transfer function。
@@ -622,9 +920,43 @@ const drawNiftiVR = async function(pix: Float32Array | Int16Array,
     fast: boolean = false) {
 
       if (cv1.value === null || ctx === null) return;
-      isEmpty.value = false;
       const canvasx = cv1.value.width;
       const canvasy = cv1.value.height;
+
+      // ====== WebGPU fast path ======
+      // VR は overlay path がそもそも無い (CPU 版でも overlay 受けない) ので無条件 GPU 試行。
+      const t0 = performance.now();
+      if (perfStore.gpuAllowed && isWebGpuAvailable()) {
+        try {
+          const gpuOff = await gpuRenderVr({
+            voxel: pix, nx, ny, nz,
+            outW: canvasx, outH: canvasy,
+            p00: { x: p00.x, y: p00.y, z: p00.z },
+            v01: { x: v01.x, y: v01.y, z: v01.z },
+            v10: { x: v10.x, y: v10.y, z: v10.z },
+            angle, wc, ww, clut,
+            targetCanvas: cv1.value,
+          });
+          if (gpuOff) {
+            isEmpty.value = false;
+            ctx.drawImage(gpuOff as any, 0, 0);
+            perfStore.record('vr', 'gpu', performance.now() - t0);
+            return;
+          }
+        } catch (err) {
+          console.warn('[gpu] VR failed:', err);
+          if (!perfStore.cpuFallbackAllowed) return;
+        }
+      }
+      if (!perfStore.cpuFallbackAllowed) {
+        console.warn('[vr] CPU fallback blocked by rendererMode=gpu — filling sentinel');
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(0, 0, canvasx, canvasy);
+        isEmpty.value = false;
+        return;
+      }
+
+      isEmpty.value = false;
       const myImageData = ctx.getImageData(0, 0, canvasx, canvasy);
 
       // Pre-compute: 各 (k, j) に対し ray-cast → RGBA composite を vrData に
@@ -714,7 +1046,144 @@ const drawNiftiVR = async function(pix: Float32Array | Int16Array,
       }
 
       ctx.putImageData(myImageData, 0, 0, 0, 0, canvasx, canvasy);
+      perfStore.record('vr', 'cpu', performance.now() - t0);
 }
+
+// Fusion VR: drawFusionMip と同じ pattern で 2 volume を front-to-back composite。
+// 各 volume を独立に composite してから baseW/ovlW で α blend。
+const drawFusionVR = async function(
+    pix0: Float32Array | Int16Array,
+    nx0:number, ny0:number, nz0:number, wc0:number, ww0:number,
+    p00_0:THREE.Vector3, v01_0:THREE.Vector3, v10_0:THREE.Vector3, clut0: number[][],
+    pix1: Float32Array | Int16Array,
+    nx1:number, ny1:number, nz1:number, wc1:number, ww1:number,
+    p00_1:THREE.Vector3, v01_1:THREE.Vector3, v10_1:THREE.Vector3, clut1: number[][],
+    angle: number, alpha: number = 0.5,
+) {
+    if (cv1.value === null || ctx === null) return;
+    const canvasx = cv1.value.width;
+    const canvasy = cv1.value.height;
+    const t0 = performance.now();
+
+    if (perfStore.gpuAllowed && isWebGpuAvailable()) {
+        try {
+            const gpuOff = await gpuRenderFusionVr({
+                voxel0: pix0, nx0, ny0, nz0,
+                p00_0: { x: p00_0.x, y: p00_0.y, z: p00_0.z },
+                v01_0: { x: v01_0.x, y: v01_0.y, z: v01_0.z },
+                v10_0: { x: v10_0.x, y: v10_0.y, z: v10_0.z },
+                wc0, ww0, clut0,
+                voxel1: pix1, nx1, ny1, nz1,
+                p00_1: { x: p00_1.x, y: p00_1.y, z: p00_1.z },
+                v01_1: { x: v01_1.x, y: v01_1.y, z: v01_1.z },
+                v10_1: { x: v10_1.x, y: v10_1.y, z: v10_1.z },
+                wc1, ww1, clut1,
+                outW: canvasx, outH: canvasy,
+                angle, overlayBlend: alpha,
+                targetCanvas: cv1.value,
+            });
+            if (gpuOff) {
+                isEmpty.value = false;
+                ctx.drawImage(gpuOff as any, 0, 0);
+                perfStore.record('vr-multi', 'gpu', performance.now() - t0);
+                return;
+            }
+        } catch (err) {
+            console.warn('[gpu] fusion-vr failed:', err);
+            if (!perfStore.cpuFallbackAllowed) {
+                ctx.fillStyle = '#ff0000'; ctx.fillRect(0, 0, canvasx, canvasy);
+                isEmpty.value = false; return;
+            }
+        }
+    }
+    if (!perfStore.cpuFallbackAllowed) {
+        ctx.fillStyle = '#ff0000'; ctx.fillRect(0, 0, canvasx, canvasy);
+        isEmpty.value = false; return;
+    }
+
+    // CPU fallback
+    isEmpty.value = false;
+    const myImageData = ctx.getImageData(0, 0, canvasx, canvasy);
+    const baseW = 1 - alpha;
+    const ovlW = alpha;
+    const s = Math.sin((angle - 90) * Math.PI / 180);
+    const c = Math.cos((angle - 90) * Math.PI / 180);
+    const lo0 = wc0 - ww0 / 2;
+    const lo1 = wc1 - ww1 / 2;
+    const ALPHA_SCALE = 0.06;
+
+    let ad = 0;
+    for (let cy = 0; cy < canvasy; cy++) {
+        const v0row = p00_0.clone().addScaledVector(v01_0, cy);
+        const v1row = p00_1.clone().addScaledVector(v01_1, cy);
+        for (let cx = 0; cx < canvasx; cx++) {
+            const v0 = v0row.clone().floor();
+            const v1 = v1row.clone().floor();
+
+            // ---- CT VR ----
+            let ctR = 0, ctG = 0, ctB = 0, ctA = 0;
+            if (v0.x >= 0 && v0.x < nx0 && v0.z >= 0 && v0.z < nz0) {
+                const j0 = v0.x - ny0 / 2;
+                const k0 = v0.z;
+                for (let i = 0; i < nx0; i++) {
+                    if (ctA > 0.99) break;
+                    const i0 = i - nx0 / 2;
+                    const x = Math.floor(i0 * c - j0 * s) + nx0 / 2;
+                    const y = Math.floor(i0 * s + j0 * c) + ny0 / 2;
+                    if (x < 0 || x >= nx0 || y < 0 || y >= ny0) continue;
+                    const v = pix0[k0 * nx0 * ny0 + y * nx0 + x];
+                    let p = (v - lo0) / ww0;
+                    if (p < 0) continue;
+                    if (p > 1) p = 1;
+                    const aa = p * ALPHA_SCALE;
+                    if (aa < 0.002) continue;
+                    const cidx = Math.min(255, Math.floor(p * 255));
+                    const cc = clut0[cidx];
+                    const transmit = 1 - ctA;
+                    ctR += transmit * aa * cc[0];
+                    ctG += transmit * aa * cc[1];
+                    ctB += transmit * aa * cc[2];
+                    ctA += transmit * aa;
+                }
+            }
+            // ---- PET VR ----
+            let ptR = 0, ptG = 0, ptB = 0, ptA = 0;
+            if (v1.x >= 0 && v1.x < nx1 && v1.z >= 0 && v1.z < nz1) {
+                const j1 = v1.x - ny1 / 2;
+                const k1 = v1.z;
+                for (let i = 0; i < nx1; i++) {
+                    if (ptA > 0.99) break;
+                    const i0 = i - nx1 / 2;
+                    const x = Math.floor(i0 * c - j1 * s) + nx1 / 2;
+                    const y = Math.floor(i0 * s + j1 * c) + ny1 / 2;
+                    if (x < 0 || x >= nx1 || y < 0 || y >= ny1) continue;
+                    const v = pix1[k1 * nx1 * ny1 + y * nx1 + x];
+                    let p = (v - lo1) / ww1;
+                    if (p < 0) continue;
+                    if (p > 1) p = 1;
+                    const aa = p * ALPHA_SCALE;
+                    if (aa < 0.002) continue;
+                    const cidx = Math.min(255, Math.floor(p * 255));
+                    const cc = clut1[cidx];
+                    const transmit = 1 - ptA;
+                    ptR += transmit * aa * cc[0];
+                    ptG += transmit * aa * cc[1];
+                    ptB += transmit * aa * cc[2];
+                    ptA += transmit * aa;
+                }
+            }
+            myImageData.data[ad]     = ctR * baseW + ptR * ovlW;
+            myImageData.data[ad + 1] = ctG * baseW + ptG * ovlW;
+            myImageData.data[ad + 2] = ctB * baseW + ptB * ovlW;
+            myImageData.data[ad + 3] = 255;
+            ad += 4;
+            v0row.add(v10_0);
+            v1row.add(v10_1);
+        }
+    }
+    ctx.putImageData(myImageData, 0, 0);
+    perfStore.record('vr-multi', 'cpu', performance.now() - t0);
+};
 
 
 
@@ -896,9 +1365,10 @@ const drawPolygonOverlay = (vertices: Array<[number, number]>, mode: 'add' | 'er
 };
 
 defineExpose({init, show, show2, showRgb, showDirect,
-   drawNiftiSlice, drawNiftiSliceFusion, drawNiftiMip, drawNiftiVR, clear,
+   drawNiftiSlice, drawNiftiSliceFusion, drawNiftiMip, drawNiftiVR,
+   drawFusionMip, drawFusionVR, clear,
    drawSphereOverlay, drawPolygonOverlay,
-   // AI ROI (LiteMedSAM) は box の canvas pixel を読む必要がある
+   // canvas pixel を外部から読む用 (parity test 等)
    cv1});
 
 </script>
