@@ -317,3 +317,45 @@ Volume 単独 / Fusion 両方をハンドル（`isVolumeImageBoxInfo` は `clut1
 - Windows 11 Pro、Chrome/Edge（File System Access API 必要）
 - npm run build / vue-tsc --noEmit いずれも exit=0
 - 開発サーバ: ポート 3000 が使用中だったため 3001 で起動していた
+
+---
+
+## ペルソナと優先度 (2026-05-04 確認、ユーザ指示)
+
+**最重要 = ペルソナ 1 (PET/CT MTV 測定)**。Metavol はもともと MTV 測定ソフトとして始まった。
+
+### ペルソナ 1: PET/CT MTV 測定 ★最重要
+- **解決する問題**: PET volume から腫瘍体積 (MTV) と total lesion glycolysis (TLG) を測定する。臨床/研究用。
+- **現状の充足度** (commit b84d1cd 時点で高い):
+  - Sphere ROI / Polygon ROI / threshold スライダ (PERCIST liver / pct-of-max / fixed) / Apply
+  - Find islands (26-連結 CC) / Assign label / Save NIfTI mask
+  - Lesion table、SUVpeak、TMTV cutoff (DLBCL CAR-T 48cc / NSCLC 80cc)、Deauville 5pt
+  - Snapshot (.mvs) で session 永続化
+- **次の伸びしろ** (この優先順で):
+  1. Voxel-level brush edit (1 voxel ON/OFF。polygon より細かい修正用)
+  2. Undo を polygon 以外にも拡張 (apply / assign label / paint の取消)
+  3. Lesion table の inline rename / delete / merge / split
+  4. Multi-timepoint comparison (baseline vs follow-up、PERCIST 自動判定)
+
+### ペルソナ 2: 簡易 viewer (URL share)
+- **解決する問題**: 院内/カンファレンスで DICOM/NIfTI を「リンク 1 つ」で共有して見せる。
+- **現状の充足度** (中-高):
+  - Drag & drop DICOM/NIfTI、`?url=` で外部 URL 共有、append drag (commit b84d1cd)
+  - NIfTI raw byte view、NIfTI header viewer (volume card "..." menu)
+  - nii.gz native streaming gunzip + 進捗 chip
+- **次の伸びしろ**: URL に view state (W/L、CLUT、layout) を載せる。OHIF 風 share。
+
+### ペルソナ 3: PET/MR + radiomics
+- **解決する問題**: MR と PET を整合させて anatomical context 付きで MTV を測る。Radiomics 抽出。
+- **現状の充足度** (中):
+  - MR registration (rigid 6-DOF, MI + Nelder-Mead, 3-level pyramid)
+  - Radiomics features (first-order / shape / GLCM / GLRLM)
+- **次の伸びしろ**:
+  1. WebGPU MI で registration 5-30s → 0.1-1s (TODO に詳細あり)
+  2. 手動 nudge UI (Fusion box で MR を Shift+drag で ±1mm 移動)
+  3. Radiomics 結果テーブルの UI 改善 (現状は console / snapshot 内)
+
+### 開発判断のガイド
+- 機能追加で迷ったら **ペルソナ 1 の MTV 測定 UX を改善するか?** を最初に問う。Yes なら高優先。
+- 「P2/P3 専用機能」は P1 を妨げない範囲で追加 (画面の右下に隠す等)。
+- 「P1 が触らない領域」(MR registration、PNG/JPG planar 等) は別 commit で。

@@ -66,6 +66,13 @@ const prop = defineProps<{
   overlayClut?: number;         // overlay レイヤの現在 CLUT id (clut1)
   // Fusion box: Window/Level drag が作用するレイヤ ('base' | 'overlay')。'base' なら base 側、それ以外は overlay 側
   activeWindowLayer?: 'base' | 'overlay';
+  // 補間モード (slice/MPR 用)。VolumeBox は interpolation のみ、FusionBox は両方使う。
+  interpolation?: 'nearest' | 'bilinear';
+  interpolation1?: 'nearest' | 'bilinear';
+  // sMIP / VR の現在値 (titlebar 歯車 popover の表示用)。MIP / 通常スライスでは null/undefined。
+  mipThreshold?: number;
+  mipDepth?: number;
+  mipAlphaScale?: number;
 }>();
 
 const emit = defineEmits<{
@@ -76,7 +83,7 @@ const emit = defineEmits<{
   (e: 'toggleSync'): void;
   (e: 'maximize'): void;
   (e: 'toggleOverlay'): void;
-  (e: 'makeMpr'): void;
+  (e: 'makeMpr', plane: 'axi' | 'cor' | 'sag'): void;
   (e: 'saveVolumeNifti'): void;
   // Modality chip drag start: 親 (DicomView) が dataTransfer を埋めて fusion 起点にする
   (e: 'modalityDragStart', ev: DragEvent): void;
@@ -88,6 +95,11 @@ const emit = defineEmits<{
   (e: 'duplicateBox'): void;
   // Fusion box: Window/Level drag の対象レイヤを切替 ('base' | 'overlay')
   (e: 'setActiveWindowLayer', layer: 'base' | 'overlay'): void;
+  // Sampling 補間切替。layer='base' なら interpolation (vol0)、layer='overlay' なら interpolation1 (vol1)
+  // VolumeBox は layer='base' のみ送る。FusionBox は base / overlay 両方を別々に切替可能。
+  (e: 'setInterpolation', payload: { layer: 'base' | 'overlay'; mode: 'nearest' | 'bilinear' }): void;
+  // sMIP / VR のレンダリングパラメータ更新 (titlebar 歯車 popover)
+  (e: 'setMipParam', payload: { key: 'thresholdSurfaceMip' | 'depthSurfaceMip' | 'alphaScale'; value: number }): void;
 }>();
 
 // Fusion box の overlay clut が active か判定 (clut1 用)
@@ -157,6 +169,18 @@ const onSavePngLocal = () => {
 
 const cv1 = ref<HTMLCanvasElement | null>(null);
 let ctx: CanvasRenderingContext2D | null = null;
+
+// 3D volume を fractional voxel 座標で nearest-to-center sampling する。
+// 範囲外なら null。voxel 中心は整数座標前提なので floor(v + 0.5) で最近傍 center。
+const sampleNearest = (
+    pix: Float32Array | Int16Array,
+    nx: number, ny: number, nz: number,
+    vx: number, vy: number, vz: number,
+): number | null => {
+    const x = Math.floor(vx + 0.5), y = Math.floor(vy + 0.5), z = Math.floor(vz + 0.5);
+    if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) return null;
+    return pix[z * nx * ny + y * nx + x];
+};
 
 // 3D volume を fractional voxel 座標で trilinear sampling する。
 // 範囲外なら null を返す (caller が背景値で埋める想定)。
@@ -315,7 +339,8 @@ const drawNiftiSlice = async function(pix: Float32Array | Int16Array,
     nx:number, ny:number, nz:number, wc:number, ww:number,
     p00:THREE.Vector3, v01:THREE.Vector3,v10:THREE.Vector3, clut: number[][],
     overlay?: MaskOverlay,
-    bodyMask?: Uint8Array) {     // CT 寝台除去用 body mask (0=体外, 1=体内)
+    bodyMask?: Uint8Array,         // CT 寝台除去用 body mask (0=体外, 1=体内)
+    interpolation: 'nearest' | 'bilinear' = 'bilinear') {
 
       if (cv1.value === null || ctx === null) return;
       const canvasx = cv1.value.width;
@@ -344,6 +369,7 @@ const drawNiftiSlice = async function(pix: Float32Array | Int16Array,
             } : undefined,
             bodyMask,
             targetCanvas: cv1.value,
+            interpolation,
           });
           if (gpuOff) {
             isEmpty.value = false;
@@ -378,9 +404,10 @@ const drawNiftiSlice = async function(pix: Float32Array | Int16Array,
         const vm = overlay ? overlay.p00.clone().addScaledVector(overlay.v01, i) : null;
         for (let j = 0; j<canvasx; j++){
 
-          // trilinear sampling: 低解像 PET を高解像 box に表示するときに滑らか。
-          // 範囲外なら null を返し、既存の clut[0] フォールバックを使う。
-          let raw = sampleTrilinear(pix, nx, ny, nz, v.x, v.y, v.z);
+          // 補間: 'bilinear' (実体は trilinear) で滑らか、'nearest' で voxel 境界くっきり。
+          let raw = interpolation === 'nearest'
+              ? sampleNearest(pix, nx, ny, nz, v.x, v.y, v.z)
+              : sampleTrilinear(pix, nx, ny, nz, v.x, v.y, v.z);
           // CT 寝台除去: bodyMask が定義されていて当該 voxel が体外なら -1024 で塗り潰す
           if (raw != null && bodyMask){
             const bx = Math.floor(v.x), by = Math.floor(v.y), bz = Math.floor(v.z);
@@ -437,6 +464,8 @@ const drawNiftiSliceFusion = async function(pix0: Float32Array | Int16Array,
     overlay?: MaskOverlay,
     bodyMask?: Uint8Array,    // CT 寝台除去用 (pix0=CT 想定)
     alpha: number = 0.5,      // overlay (pix1) ブレンド比 0..1。base は (1-alpha)。
+    interpolation0: 'nearest' | 'bilinear' = 'bilinear',  // base layer
+    interpolation1: 'nearest' | 'bilinear' = 'bilinear',  // overlay layer
   ) {
 
       if (cv1.value === null || ctx === null) return;
@@ -460,6 +489,8 @@ const drawNiftiSliceFusion = async function(pix0: Float32Array | Int16Array,
             wc1, ww1, clut1,
             outW: canvasx, outH: canvasy,
             overlayBlend: alpha,
+            interpolation0,
+            interpolation1,
             overlay: overlay ? {
               mask: overlay.mask,
               version: overlay.version ?? 0,
@@ -509,14 +540,19 @@ const drawNiftiSliceFusion = async function(pix0: Float32Array | Int16Array,
         const vm = overlay ? overlay.p00.clone().addScaledVector(overlay.v01, i) : null;
         for (let j = 0; j<canvasx; j++){
 
-          const v0_0 = v_0.clone().floor();
-          const v0_1 = v_1.clone().floor();
-
-          if (v0_0.x >= 0 && v0_0.x < nx0 && v0_0.y >= 0 && v0_0.y < ny0 && v0_0.z >= 0 && v0_0.z < nz0){
-            let raw = pix0[ny0*nx0*v0_0.z+nx0*v0_0.y+v0_0.x];
-            // CT 寝台除去: bodyMask が定義されていて当該 voxel が体外なら -1024
-            if (bodyMask && bodyMask[ny0*nx0*v0_0.z+nx0*v0_0.y+v0_0.x] === 0){
-              raw = -1024;
+          // base (pix0): interpolation0 で nearest / bilinear 切替
+          const rawBase = interpolation0 === 'nearest'
+              ? sampleNearest(pix0, nx0, ny0, nz0, v_0.x, v_0.y, v_0.z)
+              : sampleTrilinear(pix0, nx0, ny0, nz0, v_0.x, v_0.y, v_0.z);
+          if (rawBase != null){
+            let raw = rawBase;
+            // CT 寝台除去: bodyMask は voxel-grid なので nearest 固定で参照 (round-to-center)
+            if (bodyMask){
+              const bx = Math.floor(v_0.x + 0.5), by = Math.floor(v_0.y + 0.5), bz = Math.floor(v_0.z + 0.5);
+              if (bx >= 0 && bx < nx0 && by >= 0 && by < ny0 && bz >= 0 && bz < nz0
+                  && bodyMask[ny0*nx0*bz+nx0*by+bx] === 0){
+                raw = -1024;
+              }
             }
             let p = Math.floor((raw-(wc0-ww0/2)) * (255/ww0));
             if (p<0) p=0;
@@ -530,8 +566,10 @@ const drawNiftiSliceFusion = async function(pix0: Float32Array | Int16Array,
             myImageData.data[ad+2] = clut0[0][2] * baseW;
           }
 
-          // PET layer: trilinear sampling (低解像 PET を CT 上に重ねるときに滑らか)
-          const rawPet = sampleTrilinear(pix1, nx1, ny1, nz1, v_1.x, v_1.y, v_1.z);
+          // overlay (pix1): interpolation1 で nearest / bilinear 切替
+          const rawPet = interpolation1 === 'nearest'
+              ? sampleNearest(pix1, nx1, ny1, nz1, v_1.x, v_1.y, v_1.z)
+              : sampleTrilinear(pix1, nx1, ny1, nz1, v_1.x, v_1.y, v_1.z);
           if (rawPet != null){
             let p = Math.floor((rawPet-(wc1-ww1/2)) * (255/ww1));
             if (p<0) p=0;
@@ -920,8 +958,11 @@ const drawFusionMip = async function(
 const drawNiftiVR = async function(pix: Float32Array | Int16Array,
     nx: number, ny: number, nz: number, wc: number, ww: number,
     p00: THREE.Vector3, v01: THREE.Vector3, v10: THREE.Vector3,
-    angle: number, clut: number[][],
-    fast: boolean = false) {
+    vForward: THREE.Vector3,                                  // through-plane voxel-step
+    maxSteps: number,                                         // ray sample 回数
+    clut: number[][],
+    fast: boolean = false,
+    alphaScale: number = 0.06) {
 
       if (cv1.value === null || ctx === null) return;
       const canvasx = cv1.value.width;
@@ -938,8 +979,11 @@ const drawNiftiVR = async function(pix: Float32Array | Int16Array,
             p00: { x: p00.x, y: p00.y, z: p00.z },
             v01: { x: v01.x, y: v01.y, z: v01.z },
             v10: { x: v10.x, y: v10.y, z: v10.z },
-            angle, wc, ww, clut,
+            vForward: { x: vForward.x, y: vForward.y, z: vForward.z },
+            maxSteps,
+            wc, ww, clut,
             targetCanvas: cv1.value,
+            alphaScale,
           });
           if (gpuOff) {
             isEmpty.value = false;
@@ -962,90 +1006,49 @@ const drawNiftiVR = async function(pix: Float32Array | Int16Array,
 
       isEmpty.value = false;
       const myImageData = ctx.getImageData(0, 0, canvasx, canvasy);
+      void fast;        // CPU 旧 stride/precompute は廃止 (vForward 方式に変更)
 
-      // Pre-compute: 各 (k, j) に対し ray-cast → RGBA composite を vrData に
-      const vrData = new Uint8ClampedArray(ny * nz * 4);
-
-      const s = Math.sin((angle - 90) * Math.PI / 180);
-      const c = Math.cos((angle - 90) * Math.PI / 180);
-
-      const stride = fast ? 2 : 1;
       const lo = wc - ww / 2;
       const range = ww;
-      const ALPHA_SCALE = 0.06;  // 透明感の調整 (大きいほど不透明)
+      const ALPHA_SCALE = alphaScale;
+      const nxny = nx * ny;
 
-      for (let k = 0; k < nz; k += stride) {
-        for (let j = 0; j < ny; j += stride) {
+      // 自由回転対応: 各 canvas pixel に対し、直接 vForward 方向に ray を歩く。
+      // 旧 (k, j) precompute + 2D resample は z 軸固定が前提だったので廃止。
+      let ad = 0;
+      for (let cy = 0; cy < canvasy; cy++) {
+        let px0 = p00.x + cy * v01.x;
+        let py0 = p00.y + cy * v01.y;
+        let pz0 = p00.z + cy * v01.z;
+        for (let cx = 0; cx < canvasx; cx++) {
           let dr = 0, dg = 0, db = 0, da = 0;
-          const j0 = j - ny / 2;
-          // Front-to-back: i = 0 → nx-1 (viewer から奥へ)
-          for (let i = 0; i < nx; i++) {
-            const i0 = i - nx / 2;
-            const x = Math.floor(i0 * c - j0 * s) + nx / 2;
-            const y = Math.floor(i0 * s + j0 * c) + ny / 2;
-            if (x < 0 || x >= nx || y < 0 || y >= ny) continue;
-            const v = pix[k * nx * ny + y * nx + x];
+          for (let s = 0; s < maxSteps; s++) {
+            if (da > 0.99) break;
+            const px = px0 + s * vForward.x;
+            const py = py0 + s * vForward.y;
+            const pz = pz0 + s * vForward.z;
+            const ix = Math.floor(px), iy = Math.floor(py), iz = Math.floor(pz);
+            if (ix < 0 || ix >= nx || iy < 0 || iy >= ny || iz < 0 || iz >= nz) continue;
+            const v = pix[iz * nxny + iy * nx + ix];
             let p = (v - lo) / range;
             if (p < 0) continue;
             if (p > 1) p = 1;
-            // Ramp opacity transfer function
             const alpha = p * ALPHA_SCALE;
             if (alpha < 0.002) continue;
             const cidx = Math.min(255, Math.floor(p * 255));
-            const cr = clut[cidx][0], cg = clut[cidx][1], cb = clut[cidx][2];
-            // Front-to-back composite: dst += transmit * α * src; transmit = 1 - dst.α
+            const c = clut[cidx];
             const transmit = 1 - da;
-            dr += transmit * alpha * cr;
-            dg += transmit * alpha * cg;
-            db += transmit * alpha * cb;
+            dr += transmit * alpha * c[0];
+            dg += transmit * alpha * c[1];
+            db += transmit * alpha * c[2];
             da += transmit * alpha;
-            if (da > 0.99) break;  // early exit
           }
-          const idx = (k * ny + j) * 4;
-          vrData[idx]     = dr;
-          vrData[idx + 1] = dg;
-          vrData[idx + 2] = db;
-          vrData[idx + 3] = Math.min(255, da * 255);
-        }
-      }
-
-      // fast mode の gap fill (近傍コピー)
-      if (stride > 1) {
-        for (let k = 0; k < nz; k++) {
-          const k0 = k - (k % stride);
-          for (let j = 0; j < ny; j++) {
-            if ((k % stride) === 0 && (j % stride) === 0) continue;
-            const j0 = j - (j % stride);
-            const src = (k0 * ny + j0) * 4;
-            const dst = (k * ny + j) * 4;
-            vrData[dst]     = vrData[src];
-            vrData[dst + 1] = vrData[src + 1];
-            vrData[dst + 2] = vrData[src + 2];
-            vrData[dst + 3] = vrData[src + 3];
-          }
-        }
-      }
-
-      // Canvas pixel render (MIP と同じ index 形式)
-      let ad = 0;
-      for (let i = 0; i < canvasy; i++) {
-        let v = p00.clone().addScaledVector(v01, i);
-        for (let j = 0; j < canvasx; j++) {
-          const v0 = v.clone().floor();
-          if (v0.x >= 0 && v0.x < nx && v0.y >= 0 && v0.y < ny && v0.z >= 0 && v0.z < nz) {
-            const src = (nx * v0.z + v0.x) * 4;
-            myImageData.data[ad]     = vrData[src];
-            myImageData.data[ad + 1] = vrData[src + 1];
-            myImageData.data[ad + 2] = vrData[src + 2];
-            myImageData.data[ad + 3] = 255;
-          } else {
-            myImageData.data[ad]     = 0;
-            myImageData.data[ad + 1] = 0;
-            myImageData.data[ad + 2] = 0;
-            myImageData.data[ad + 3] = 255;
-          }
+          myImageData.data[ad]     = dr;
+          myImageData.data[ad + 1] = dg;
+          myImageData.data[ad + 2] = db;
+          myImageData.data[ad + 3] = 255;
           ad += 4;
-          v.add(v10);
+          px0 += v10.x; py0 += v10.y; pz0 += v10.z;
         }
       }
 
@@ -1399,6 +1402,7 @@ defineExpose({init, show, show2, showRgb, showDirect,
             </span>
 
             <span class="mv-titlebar-actions" @dblclick.stop>
+                <!-- Volume / Fusion / MIP: 6 plane (axi/cor/sag/mip/smip/vr) 切替 -->
                 <v-menu v-if="isVolumeKind()" location="bottom end">
                     <template v-slot:activator="{ props: act }">
                         <v-btn v-bind="act" icon variant="text" size="x-small" class="mv-tb-btn">
@@ -1412,6 +1416,22 @@ defineExpose({init, show, show2, showRgb, showDirect,
                                      @click="emit('setPlane', p.id)">
                             <v-list-item-title>{{ p.label }}</v-list-item-title>
                         </v-list-item>
+                    </v-list>
+                </v-menu>
+
+                <!-- DicomBox: Make MPR を 3 軸ドロップダウンに統一 (VolumeBox の Plane/View と同じ見た目)。
+                     クリックで mpr_(seriesIdx, boxId) → setPlaneOnBox(boxId, plane) を親が実行。 -->
+                <v-menu v-else-if="prop.boxKind === 'dicom'" location="bottom end">
+                    <template v-slot:activator="{ props: act }">
+                        <v-btn v-bind="act" icon variant="text" size="x-small" class="mv-tb-btn">
+                            <v-icon icon="mdi-axis-arrow" size="small" />
+                            <v-tooltip activator="parent" location="bottom">Make MPR (this box)</v-tooltip>
+                        </v-btn>
+                    </template>
+                    <v-list density="compact">
+                        <v-list-item @click="emit('makeMpr', 'axi')"><v-list-item-title>Axial</v-list-item-title></v-list-item>
+                        <v-list-item @click="emit('makeMpr', 'cor')"><v-list-item-title>Coronal</v-list-item-title></v-list-item>
+                        <v-list-item @click="emit('makeMpr', 'sag')"><v-list-item-title>Sagittal</v-list-item-title></v-list-item>
                     </v-list>
                 </v-menu>
 
@@ -1466,6 +1486,141 @@ defineExpose({init, show, show2, showRgb, showDirect,
                             <v-list-item-title>{{ c.label }}</v-list-item-title>
                         </v-list-item>
                     </v-list>
+                </v-menu>
+
+                <!-- 補間モード切替: slice/MPR の base / overlay を nearest / bilinear に。
+                     MIP / VR 表示中は補間概念がないため非表示。
+                     VolumeBox: 単一メニュー (Nearest / Bilinear)
+                     FusionBox: 2 階層 (Base → / Overlay → → Nearest / Bilinear) -->
+                <v-menu
+                    v-if="(prop.boxKind === 'volume' || prop.boxKind === 'fusion')
+                          && (prop.currentPlane === 'axi' || prop.currentPlane === 'cor' || prop.currentPlane === 'sag')"
+                    location="bottom end"
+                >
+                    <template v-slot:activator="{ props: act }">
+                        <v-btn v-bind="act" icon variant="text" size="x-small" class="mv-tb-btn">
+                            <v-icon icon="mdi-blur" size="small" />
+                            <v-tooltip activator="parent" location="bottom">Sampling (interpolation)</v-tooltip>
+                        </v-btn>
+                    </template>
+                    <!-- VolumeBox: 直接 nearest/bilinear -->
+                    <v-list v-if="prop.boxKind === 'volume'" density="compact">
+                        <v-list-item :active="(prop.interpolation ?? 'bilinear') === 'bilinear'"
+                                     @click="emit('setInterpolation', { layer: 'base', mode: 'bilinear' })">
+                            <v-list-item-title>Bilinear (smooth)</v-list-item-title>
+                        </v-list-item>
+                        <v-list-item :active="prop.interpolation === 'nearest'"
+                                     @click="emit('setInterpolation', { layer: 'base', mode: 'nearest' })">
+                            <v-list-item-title>Nearest (crisp voxels)</v-list-item-title>
+                        </v-list-item>
+                    </v-list>
+                    <!-- FusionBox: layer → mode の 2 段ネスト -->
+                    <v-list v-else density="compact">
+                        <v-menu open-on-hover location="end">
+                            <template v-slot:activator="{ props: a }">
+                                <v-list-item v-bind="a">
+                                    <template v-slot:prepend>
+                                        <span class="mv-tb-clut-mod" :style="{ background: modalityChipColor(prop.baseModality) }">{{ prop.baseModality || 'Base' }}</span>
+                                    </template>
+                                    <v-list-item-title>Base ({{ (prop.interpolation ?? 'bilinear') }})</v-list-item-title>
+                                    <template v-slot:append>
+                                        <v-icon icon="mdi-chevron-right" size="small" />
+                                    </template>
+                                </v-list-item>
+                            </template>
+                            <v-list density="compact">
+                                <v-list-item :active="(prop.interpolation ?? 'bilinear') === 'bilinear'"
+                                             @click="emit('setInterpolation', { layer: 'base', mode: 'bilinear' })">
+                                    <v-list-item-title>Bilinear</v-list-item-title>
+                                </v-list-item>
+                                <v-list-item :active="prop.interpolation === 'nearest'"
+                                             @click="emit('setInterpolation', { layer: 'base', mode: 'nearest' })">
+                                    <v-list-item-title>Nearest</v-list-item-title>
+                                </v-list-item>
+                            </v-list>
+                        </v-menu>
+                        <v-menu open-on-hover location="end">
+                            <template v-slot:activator="{ props: a }">
+                                <v-list-item v-bind="a">
+                                    <template v-slot:prepend>
+                                        <span class="mv-tb-clut-mod" :style="{ background: modalityChipColor(prop.overlayModality) }">{{ prop.overlayModality || 'Ovl' }}</span>
+                                    </template>
+                                    <v-list-item-title>Overlay ({{ (prop.interpolation1 ?? 'bilinear') }})</v-list-item-title>
+                                    <template v-slot:append>
+                                        <v-icon icon="mdi-chevron-right" size="small" />
+                                    </template>
+                                </v-list-item>
+                            </template>
+                            <v-list density="compact">
+                                <v-list-item :active="(prop.interpolation1 ?? 'bilinear') === 'bilinear'"
+                                             @click="emit('setInterpolation', { layer: 'overlay', mode: 'bilinear' })">
+                                    <v-list-item-title>Bilinear</v-list-item-title>
+                                </v-list-item>
+                                <v-list-item :active="prop.interpolation1 === 'nearest'"
+                                             @click="emit('setInterpolation', { layer: 'overlay', mode: 'nearest' })">
+                                    <v-list-item-title>Nearest</v-list-item-title>
+                                </v-list-item>
+                            </v-list>
+                        </v-menu>
+                    </v-list>
+                </v-menu>
+
+                <!-- sMIP / VR レンダリングパラメータ popover。MIP (非 surface) と VR で
+                     表示項目が違う: sMIP=threshold+depth、VR=alphaScale。
+                     通常 MIP は調整するパラメータがないので非表示。-->
+                <v-menu v-if="prop.currentPlane === 'smip' || prop.currentPlane === 'vr'"
+                        location="bottom end" :close-on-content-click="false">
+                    <template v-slot:activator="{ props: act }">
+                        <v-btn v-bind="act" icon variant="text" size="x-small" class="mv-tb-btn">
+                            <v-icon icon="mdi-cog-outline" size="small" />
+                            <v-tooltip activator="parent" location="bottom">
+                                {{ prop.currentPlane === 'smip' ? 'Surface MIP parameters' : 'VR parameters' }}
+                            </v-tooltip>
+                        </v-btn>
+                    </template>
+                    <v-card min-width="260" max-width="320">
+                        <v-card-text class="pa-3">
+                            <!-- sMIP -->
+                            <template v-if="prop.currentPlane === 'smip'">
+                                <div class="mv-tb-popover-row">
+                                    <span class="mv-tb-popover-label">Threshold</span>
+                                    <span class="mv-tb-popover-value">{{ (prop.mipThreshold ?? 0.3).toFixed(2) }}</span>
+                                </div>
+                                <v-slider
+                                    :model-value="prop.mipThreshold ?? 0.3"
+                                    :min="0" :max="20" :step="0.1"
+                                    density="compact" hide-details color="primary"
+                                    @update:model-value="(v: number | number[]) => emit('setMipParam', { key: 'thresholdSurfaceMip', value: Array.isArray(v) ? v[0] : v })"
+                                />
+                                <div class="mv-tb-popover-row mt-2">
+                                    <span class="mv-tb-popover-label">Depth (voxels)</span>
+                                    <span class="mv-tb-popover-value">{{ Math.round(prop.mipDepth ?? 3) }}</span>
+                                </div>
+                                <v-slider
+                                    :model-value="prop.mipDepth ?? 3"
+                                    :min="1" :max="40" :step="1"
+                                    density="compact" hide-details color="primary"
+                                    @update:model-value="(v: number | number[]) => emit('setMipParam', { key: 'depthSurfaceMip', value: Array.isArray(v) ? v[0] : v })"
+                                />
+                            </template>
+                            <!-- VR -->
+                            <template v-else>
+                                <div class="mv-tb-popover-row">
+                                    <span class="mv-tb-popover-label">Alpha scale</span>
+                                    <span class="mv-tb-popover-value">{{ (prop.mipAlphaScale ?? 0.06).toFixed(3) }}</span>
+                                </div>
+                                <v-slider
+                                    :model-value="prop.mipAlphaScale ?? 0.06"
+                                    :min="0.005" :max="0.5" :step="0.005"
+                                    density="compact" hide-details color="primary"
+                                    @update:model-value="(v: number | number[]) => emit('setMipParam', { key: 'alphaScale', value: Array.isArray(v) ? v[0] : v })"
+                                />
+                                <div class="text-caption text-disabled mt-2">
+                                    Higher = more opaque. Lower = more transparent (deeper see-through).
+                                </div>
+                            </template>
+                        </v-card-text>
+                    </v-card>
                 </v-menu>
 
                 <!-- Fusion W/L active layer toggle (Fusion box のみ): Window/Level drag が
@@ -1548,9 +1703,6 @@ defineExpose({init, show, show2, showRgb, showDirect,
                         </v-list-item>
                         <v-list-item @click="emit('toggleOverlay')">
                             <v-list-item-title>Toggle mask overlay</v-list-item-title>
-                        </v-list-item>
-                        <v-list-item v-if="prop.boxKind === 'dicom'" @click="emit('makeMpr')">
-                            <v-list-item-title>Make MPR (this box)</v-list-item-title>
                         </v-list-item>
                     </v-list>
                 </v-menu>
@@ -1724,6 +1876,20 @@ defineExpose({init, show, show2, showRgb, showDirect,
 }
 .mv-tb-close:hover {
   color: var(--mv-error, #FF5C7A);
+}
+.mv-tb-popover-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 12px;
+}
+.mv-tb-popover-label {
+  color: var(--mv-text-muted);
+  font-weight: 500;
+}
+.mv-tb-popover-value {
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  color: var(--mv-text);
 }
 
 /* Fusion blend slider in titlebar */

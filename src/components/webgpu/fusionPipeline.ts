@@ -71,6 +71,8 @@ export interface GpuFusionParams {
     overlay?: GpuFusionOverlay;
     bodyMask?: Uint8Array;
     targetCanvas: HTMLCanvasElement;
+    interpolation0?: 'nearest' | 'bilinear';   // base layer, default 'bilinear'
+    interpolation1?: 'nearest' | 'bilinear';   // overlay layer, default 'bilinear'
 }
 
 export const gpuRenderFusion = async (
@@ -118,10 +120,12 @@ export const gpuRenderFusion = async (
     const ubuf = new ArrayBuffer(UNIFORM_SIZE);
     const i32 = new Int32Array(ubuf);
     const f32 = new Float32Array(ubuf);
-    // dims0
-    i32[0] = p.nx0; i32[1] = p.ny0; i32[2] = p.nz0; i32[3] = 0;
-    // dims1
-    i32[4] = p.nx1; i32[5] = p.ny1; i32[6] = p.nz1; i32[7] = 0;
+    // dims0: nx, ny, nz, interp0 (0=nearest, 1=bilinear)
+    i32[0] = p.nx0; i32[1] = p.ny0; i32[2] = p.nz0;
+    i32[3] = (p.interpolation0 ?? 'bilinear') === 'nearest' ? 0 : 1;
+    // dims1: nx, ny, nz, interp1
+    i32[4] = p.nx1; i32[5] = p.ny1; i32[6] = p.nz1;
+    i32[7] = (p.interpolation1 ?? 'bilinear') === 'nearest' ? 0 : 1;
     // maskDims
     i32[8] = mnx; i32[9] = mny; i32[10] = mnz; i32[11] = 0;
     // outAndFlags

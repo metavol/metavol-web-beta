@@ -14,8 +14,8 @@
 
 export const FUSION_SHADER_WGSL = /* wgsl */ `
 struct Params {
-  dims0: vec4<i32>,         // nx0, ny0, nz0, _ (base / CT)
-  dims1: vec4<i32>,         // nx1, ny1, nz1, _ (overlay / PET)
+  dims0: vec4<i32>,         // nx0, ny0, nz0, interp0 (0=nearest, 1=bilinear)
+  dims1: vec4<i32>,         // nx1, ny1, nz1, interp1
   maskDims: vec4<i32>,      // mnx, mny, mnz, _
   outAndFlags: vec4<i32>,   // outW, outH, hasOverlay, hasBodyMask
   p00_0: vec4<f32>,
@@ -42,6 +42,52 @@ struct Params {
 @group(0) @binding(8) var bodyMaskTex: texture_3d<u32>;
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 { return a + (b - a) * t; }
+
+fn sampleNearestVol0(p: vec3<f32>) -> f32 {
+  let nx = P.dims0.x; let ny = P.dims0.y; let nz = P.dims0.z;
+  let x = i32(floor(p.x + 0.5));
+  let y = i32(floor(p.y + 0.5));
+  let z = i32(floor(p.z + 0.5));
+  if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) { return 1.0e30; }
+  return textureLoad(vol0Tex, vec3<i32>(x, y, z), 0).r;
+}
+
+fn sampleTrilinearVol0(p: vec3<f32>) -> f32 {
+  let nx = P.dims0.x; let ny = P.dims0.y; let nz = P.dims0.z;
+  if (p.x < 0.0 || p.y < 0.0 || p.z < 0.0
+      || p.x >= f32(nx) || p.y >= f32(ny) || p.z >= f32(nz)) { return 1.0e30; }
+  let i0 = vec3<i32>(floor(p));
+  let f = p - vec3<f32>(i0);
+  let i1 = vec3<i32>(
+    select(i0.x + 1, i0.x, i0.x + 1 >= nx),
+    select(i0.y + 1, i0.y, i0.y + 1 >= ny),
+    select(i0.z + 1, i0.z, i0.z + 1 >= nz),
+  );
+  let c000 = textureLoad(vol0Tex, vec3<i32>(i0.x, i0.y, i0.z), 0).r;
+  let c100 = textureLoad(vol0Tex, vec3<i32>(i1.x, i0.y, i0.z), 0).r;
+  let c010 = textureLoad(vol0Tex, vec3<i32>(i0.x, i1.y, i0.z), 0).r;
+  let c110 = textureLoad(vol0Tex, vec3<i32>(i1.x, i1.y, i0.z), 0).r;
+  let c001 = textureLoad(vol0Tex, vec3<i32>(i0.x, i0.y, i1.z), 0).r;
+  let c101 = textureLoad(vol0Tex, vec3<i32>(i1.x, i0.y, i1.z), 0).r;
+  let c011 = textureLoad(vol0Tex, vec3<i32>(i0.x, i1.y, i1.z), 0).r;
+  let c111 = textureLoad(vol0Tex, vec3<i32>(i1.x, i1.y, i1.z), 0).r;
+  let c00 = lerp(c000, c100, f.x);
+  let c10 = lerp(c010, c110, f.x);
+  let c01 = lerp(c001, c101, f.x);
+  let c11 = lerp(c011, c111, f.x);
+  let c0  = lerp(c00, c10, f.y);
+  let c1  = lerp(c01, c11, f.y);
+  return lerp(c0, c1, f.z);
+}
+
+fn sampleNearestVol1(p: vec3<f32>) -> f32 {
+  let nx = P.dims1.x; let ny = P.dims1.y; let nz = P.dims1.z;
+  let x = i32(floor(p.x + 0.5));
+  let y = i32(floor(p.y + 0.5));
+  let z = i32(floor(p.z + 0.5));
+  if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) { return 1.0e30; }
+  return textureLoad(vol1Tex, vec3<i32>(x, y, z), 0).r;
+}
 
 fn sampleTrilinearVol1(p: vec3<f32>) -> f32 {
   let nx = P.dims1.x; let ny = P.dims1.y; let nz = P.dims1.z;
@@ -95,20 +141,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let cyf = f32(cy);
   let cxf = f32(cx);
 
-  // ===== base (pix0, NEAREST) =====
+  // ===== base (pix0): interp0 で nearest / bilinear =====
   let vx0 = P.p00_0.x + cyf * P.v01_0.x + cxf * P.v10_0.x;
   let vy0 = P.p00_0.y + cyf * P.v01_0.y + cxf * P.v10_0.y;
   let vz0 = P.p00_0.z + cyf * P.v01_0.z + cxf * P.v10_0.z;
-  let ix0 = i32(floor(vx0));
-  let iy0 = i32(floor(vy0));
-  let iz0 = i32(floor(vz0));
-
+  var rawBase: f32;
+  if (P.dims0.w == 0) {
+    rawBase = sampleNearestVol0(vec3<f32>(vx0, vy0, vz0));
+  } else {
+    rawBase = sampleTrilinearVol0(vec3<f32>(vx0, vy0, vz0));
+  }
   var baseColor: vec3<f32>;
-  if (ix0 >= 0 && ix0 < P.dims0.x && iy0 >= 0 && iy0 < P.dims0.y && iz0 >= 0 && iz0 < P.dims0.z) {
-    var raw = textureLoad(vol0Tex, vec3<i32>(ix0, iy0, iz0), 0).r;
+  if (rawBase < 1.0e29) {
+    var raw = rawBase;
+    // CT 寝台除去: bodyMask は voxel-grid なので nearest 固定 (round-to-center)
     if (P.outAndFlags.w == 1) {
-      let bm = textureLoad(bodyMaskTex, vec3<i32>(ix0, iy0, iz0), 0).r;
-      if (bm == 0u) { raw = -1024.0; }
+      let bx = i32(floor(vx0 + 0.5));
+      let by = i32(floor(vy0 + 0.5));
+      let bz = i32(floor(vz0 + 0.5));
+      if (bx >= 0 && bx < P.dims0.x && by >= 0 && by < P.dims0.y && bz >= 0 && bz < P.dims0.z) {
+        let bm = textureLoad(bodyMaskTex, vec3<i32>(bx, by, bz), 0).r;
+        if (bm == 0u) { raw = -1024.0; }
+      }
     }
     baseColor = lookupClut0(raw);
   } else {
@@ -118,11 +172,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let ovlW = P.blend.y;
   var rgb = baseColor * baseW;
 
-  // ===== overlay (pix1, TRILINEAR) =====
+  // ===== overlay (pix1): interp1 で nearest / bilinear =====
   let vx1 = P.p00_1.x + cyf * P.v01_1.x + cxf * P.v10_1.x;
   let vy1 = P.p00_1.y + cyf * P.v01_1.y + cxf * P.v10_1.y;
   let vz1 = P.p00_1.z + cyf * P.v01_1.z + cxf * P.v10_1.z;
-  let rawPet = sampleTrilinearVol1(vec3<f32>(vx1, vy1, vz1));
+  var rawPet: f32;
+  if (P.dims1.w == 0) {
+    rawPet = sampleNearestVol1(vec3<f32>(vx1, vy1, vz1));
+  } else {
+    rawPet = sampleTrilinearVol1(vec3<f32>(vx1, vy1, vz1));
+  }
   var ovlColor: vec3<f32>;
   if (rawPet < 1.0e29) {
     ovlColor = lookupClut1(rawPet);

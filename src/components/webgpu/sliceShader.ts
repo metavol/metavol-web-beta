@@ -23,7 +23,8 @@ struct Params {
   v01m: vec4<f32>,
   v10m: vec4<f32>,
   rotWC: vec4<f32>,        // _, _, wc, ww
-  surf:  vec4<f32>,        // overlayAlpha, labelClutLen, _, _
+  surf:  vec4<f32>,        // overlayAlpha, labelClutLen, interpolation, _
+                           //   interpolation: 0 = nearest, 1 = bilinear (trilinear)
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -35,6 +36,17 @@ struct Params {
 @group(0) @binding(6) var bodyMaskTex: texture_3d<u32>;
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 { return a + (b - a) * t; }
+
+fn sampleNearest(p: vec3<f32>) -> f32 {
+  let nx = P.dims.x; let ny = P.dims.y; let nz = P.dims.z;
+  let x = i32(floor(p.x + 0.5));
+  let y = i32(floor(p.y + 0.5));
+  let z = i32(floor(p.z + 0.5));
+  if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) {
+    return 1.0e30;
+  }
+  return textureLoad(volumeTex, vec3<i32>(x, y, z), 0).r;
+}
 
 fn sampleTrilinear(p: vec3<f32>) -> f32 {
   let nx = P.dims.x; let ny = P.dims.y; let nz = P.dims.z;
@@ -90,14 +102,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let vy = P.p00.y + cyf * P.v01.y + cxf * P.v10.y;
   let vz = P.p00.z + cyf * P.v01.z + cxf * P.v10.z;
 
-  var raw = sampleTrilinear(vec3<f32>(vx, vy, vz));
+  // 補間モード: P.surf.z == 0 → nearest、それ以外 → trilinear
+  var raw: f32;
+  if (P.surf.z < 0.5) {
+    raw = sampleNearest(vec3<f32>(vx, vy, vz));
+  } else {
+    raw = sampleTrilinear(vec3<f32>(vx, vy, vz));
+  }
   let inBounds = raw < 1.0e29;
 
-  // body mask (CT 寝台除去)
+  // body mask (CT 寝台除去) は voxel-grid なので nearest 固定 (round-to-center)
   if (inBounds && P.outAndFlags.w == 1) {
-    let bx = i32(floor(vx));
-    let by = i32(floor(vy));
-    let bz = i32(floor(vz));
+    let bx = i32(floor(vx + 0.5));
+    let by = i32(floor(vy + 0.5));
+    let bz = i32(floor(vz + 0.5));
     if (bx >= 0 && bx < P.dims.x && by >= 0 && by < P.dims.y && bz >= 0 && bz < P.dims.z) {
       let bm = textureLoad(bodyMaskTex, vec3<i32>(bx, by, bz), 0).r;
       if (bm == 0u) { raw = -1024.0; }

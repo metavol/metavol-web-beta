@@ -11,12 +11,13 @@
 
 export const VR_SHADER_WGSL = /* wgsl */ `
 struct Params {
-  dims: vec4<i32>,         // nx, ny, nz, _
+  dims: vec4<i32>,         // nx, ny, nz, maxSteps (ray sample count)
   outAndMode: vec4<i32>,   // outW, outH, _, _
   p00: vec4<f32>,
   v01: vec4<f32>,
   v10: vec4<f32>,
-  rotWC: vec4<f32>,        // cosA, sinA, wc, ww
+  vForward: vec4<f32>,     // through-plane voxel-step vector (= camera forward × step size)
+  rotWC: vec4<f32>,        // _, _, wc, ww
   vrParams: vec4<f32>,     // alphaScale, _, _, _
 };
 
@@ -25,6 +26,10 @@ struct Params {
 @group(0) @binding(2) var<storage, read> clut: array<vec4<f32>>;
 @group(0) @binding(3) var outTex: texture_storage_2d<rgba8unorm, write>;
 
+// 自由回転対応: ray-cast の方向は P.vForward (through-plane voxel-step vector)。
+// 旧版は z 軸固定 + (cosA, sinA) で x'-y' 平面内 rotation だったが、自由回転では
+// camRight=v10, camUp=v01, camForward=vForward の 3 ベクトルが画面 (cx, cy, depth) → voxel
+// を完全に決める。ray は p_start = p00 + cy*v01 + cx*v10、step += vForward。
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let cx = i32(gid.x);
@@ -36,27 +41,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let nx = P.dims.x;
   let ny = P.dims.y;
   let nz = P.dims.z;
+  let maxSteps = P.dims.w;
 
   let cyf = f32(cy);
   let cxf = f32(cx);
-  let vx = P.p00.x + cyf * P.v01.x + cxf * P.v10.x;
-  let vy = P.p00.y + cyf * P.v01.y + cxf * P.v10.y;
-  let vz = P.p00.z + cyf * P.v01.z + cxf * P.v10.z;
-  let ix = i32(floor(vx));
-  let iy = i32(floor(vy));
-  let iz = i32(floor(vz));
+  let px0 = P.p00.x + cyf * P.v01.x + cxf * P.v10.x;
+  let py0 = P.p00.y + cyf * P.v01.y + cxf * P.v10.y;
+  let pz0 = P.p00.z + cyf * P.v01.z + cxf * P.v10.z;
 
-  if (ix < 0 || ix >= nx || iy < 0 || iy >= ny || iz < 0 || iz >= nz) {
-    textureStore(outTex, vec2<i32>(cx, cy), vec4<f32>(0.0, 0.0, 0.0, 1.0));
-    return;
-  }
-
-  let j0 = f32(ix) - f32(ny) * 0.5;
-  let cosA = P.rotWC.x;
-  let sinA = P.rotWC.y;
-  let wc = P.rotWC.z;
   let ww = P.rotWC.w;
-  let lo = wc - ww * 0.5;
+  let lo = P.rotWC.z - ww * 0.5;
   let alphaScale = P.vrParams.x;
 
   var dr: f32 = 0.0;
@@ -64,15 +58,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   var db: f32 = 0.0;
   var da: f32 = 0.0;
 
-  for (var i: i32 = 0; i < nx; i = i + 1) {
+  for (var i: i32 = 0; i < maxSteps; i = i + 1) {
     if (da > 0.99) { break; }
-    let i0 = f32(i) - f32(nx) * 0.5;
-    let xf = floor(i0 * cosA - j0 * sinA + f32(nx) * 0.5);
-    let yf = floor(i0 * sinA + j0 * cosA + f32(ny) * 0.5);
-    let x = i32(xf);
-    let y = i32(yf);
-    if (x < 0 || x >= nx || y < 0 || y >= ny) { continue; }
-    let v = textureLoad(volumeTex, vec3<i32>(x, y, iz), 0).r;
+    let s = f32(i);
+    let px = px0 + s * P.vForward.x;
+    let py = py0 + s * P.vForward.y;
+    let pz = pz0 + s * P.vForward.z;
+    let ix = i32(floor(px));
+    let iy = i32(floor(py));
+    let iz = i32(floor(pz));
+    if (ix < 0 || ix >= nx || iy < 0 || iy >= ny || iz < 0 || iz >= nz) { continue; }
+    let v = textureLoad(volumeTex, vec3<i32>(ix, iy, iz), 0).r;
     var p = (v - lo) / ww;
     if (p < 0.0) { continue; }
     if (p > 1.0) { p = 1.0; }

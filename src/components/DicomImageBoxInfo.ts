@@ -25,6 +25,8 @@ export type DicomSliceImageBoxInfo = ImageBoxInfoBase &  {
     zoom: number | null,
 }
 
+export type Interpolation = 'nearest' | 'bilinear';
+
 export type VolumeImageBoxInfo = ImageBoxInfoBase & {
     centerInWorld:THREE.Vector3,
     vecx: THREE.Vector3,
@@ -36,10 +38,15 @@ export type VolumeImageBoxInfo = ImageBoxInfoBase & {
         mipAngle: number,
         isSurface: boolean,
         thresholdSurfaceMip: number,
-        depthSurfaceMip: number
+        depthSurfaceMip: number,
+        // VR opacity ramp の倍率 (default 0.06)。alphaScale ↑ で不透明、↓ で透けやすい。
+        // VR にも MIP にも mip オブジェクトを共用してるのでここに置く。
+        alphaScale?: number,
     } | null,
     // Volume Rendering (front-to-back composite)。MIP/sMIP と排他: isVr=true のとき isMip=false
     isVr?: boolean,
+    // Sampling 補間モード (slice/MPR 用)。default 'bilinear'。MIP/VR には影響しない。
+    interpolation?: Interpolation,
 }
 
 export type FusedVolumeImageBoxInfo = VolumeImageBoxInfo & {
@@ -52,6 +59,9 @@ export type FusedVolumeImageBoxInfo = VolumeImageBoxInfo & {
     // 左ボタンドラッグ Window/Level 操作の対象レイヤ。'base' or 'overlay'。
     // 既定は 'overlay' (PT を調整したいケースが多いため)。titlebar の small toggle で切替。
     activeWindowLayer?: 'base' | 'overlay',
+    // base (CT) / overlay (PT) それぞれの補間モード。VolumeImageBoxInfo.interpolation
+    // は base と同義に揃える。
+    interpolation1?: Interpolation,
 }
 
 export const defaultInfo = (i: number) => {

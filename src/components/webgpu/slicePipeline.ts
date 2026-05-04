@@ -63,6 +63,7 @@ export interface GpuSliceParams {
     overlay?: GpuSliceOverlay;
     bodyMask?: Uint8Array;
     targetCanvas: HTMLCanvasElement;
+    interpolation?: 'nearest' | 'bilinear';   // default 'bilinear'
 }
 
 export const gpuRenderSlice = async (
@@ -131,10 +132,11 @@ export const gpuRenderSlice = async (
     // rotWC: _, _, wc, ww
     f32[36] = 0; f32[37] = 0;
     f32[38] = p.wc; f32[39] = p.ww;
-    // surf: overlayAlpha, labelClutLen, _, _
+    // surf: overlayAlpha, labelClutLen, interpolation, _
     f32[40] = overlayAlpha;
     f32[41] = labelClutLen;
-    f32[42] = 0; f32[43] = 0;
+    f32[42] = (p.interpolation ?? 'bilinear') === 'nearest' ? 0 : 1;
+    f32[43] = 0;
     device.queue.writeBuffer(uniformBuf, 0, ubuf);
 
     const swapTex = off.ctx.getCurrentTexture();

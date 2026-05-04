@@ -1024,10 +1024,25 @@ const triggerMipFast = (i: number) => {
 
 // ---- Title bar emit ハンドラ ----
 const onTitlebarClose = (i: number) => {
-  // Box を初期状態 (defaultInfo) に戻す
-  imageBoxInfos.value[i] = defaultInfo(i) as ImageBoxInfoBase;
-  imb.value?.[i]?.clear?.();
-  showImage(i);
+  // Box 自体を消す (旧仕様 = defaultInfo に戻して空 box を残す、を撤回)。
+  // 残った box は applyAutoFit で自動的にレイアウトを再計算 → 残り box が拡大する。
+  if (i < 0 || i >= imageBoxInfos.value.length) return;
+  imageBoxInfos.value.splice(i, 1);
+  if (boxOverlayDisabled.value.length > i) boxOverlayDisabled.value.splice(i, 1);
+  if (boxSyncEnabled.value.length > i) boxSyncEnabled.value.splice(i, 1);
+  // Set<number> 内の i 以降をデクリメント
+  const newMipFast = new Set<number>();
+  for (const k of mipFastBoxes) {
+    if (k < i) newMipFast.add(k);
+    else if (k > i) newMipFast.add(k - 1);
+  }
+  mipFastBoxes.clear();
+  for (const k of newMipFast) mipFastBoxes.add(k);
+  // tileN を 1 減らし autoFit で残り box を拡大。0 になったら空状態 (No image placeholder へ戻す)
+  if ((tileN.value ?? 0) > 0) tileN.value = (tileN.value ?? 1) - 1;
+  applyAutoFit();
+  // selectedImageBoxId が範囲外になったらリセット
+  if (selectedImageBoxId.value >= (tileN.value ?? 0)) selectedImageBoxId.value = -1;
 };
 
 // Box i を複製して新しい box として末尾に追加。
@@ -1307,15 +1322,61 @@ const onSetOverlayAlpha = (i: number, v: number) => {
   (imageBoxInfos.value[i] as FusedVolumeImageBoxInfo).overlayAlpha = v;
   showImage(i);
 };
-const onTitlebarMakeMpr = (i: number) => {
+
+// 補間モード getter / setter (slice/MPR 用)
+const getBoxInterpolation = (i: number): 'nearest' | 'bilinear' | undefined => {
+  if (!isAnyVolumeBox(i)) return undefined;
+  return (imageBoxInfos.value[i] as VolumeImageBoxInfo).interpolation;
+};
+const getBoxInterpolation1 = (i: number): 'nearest' | 'bilinear' | undefined => {
+  if (!isFusedImageBoxInfo(i)) return undefined;
+  return (imageBoxInfos.value[i] as FusedVolumeImageBoxInfo).interpolation1;
+};
+const onSetInterpolation = (i: number, payload: { layer: 'base' | 'overlay'; mode: 'nearest' | 'bilinear' }) => {
+  if (!isAnyVolumeBox(i)) return;
+  if (payload.layer === 'overlay') {
+    if (!isFusedImageBoxInfo(i)) return;
+    (imageBoxInfos.value[i] as FusedVolumeImageBoxInfo).interpolation1 = payload.mode;
+  } else {
+    (imageBoxInfos.value[i] as VolumeImageBoxInfo).interpolation = payload.mode;
+  }
+  showImage(i);
+};
+
+// sMIP / VR パラメータ getter / setter (titlebar 歯車 popover)
+const getBoxMipThreshold = (i: number): number | undefined => {
+  if (!isAnyVolumeBox(i)) return undefined;
+  return (imageBoxInfos.value[i] as VolumeImageBoxInfo).mip?.thresholdSurfaceMip;
+};
+const getBoxMipDepth = (i: number): number | undefined => {
+  if (!isAnyVolumeBox(i)) return undefined;
+  return (imageBoxInfos.value[i] as VolumeImageBoxInfo).mip?.depthSurfaceMip;
+};
+const getBoxMipAlphaScale = (i: number): number | undefined => {
+  if (!isAnyVolumeBox(i)) return undefined;
+  return (imageBoxInfos.value[i] as VolumeImageBoxInfo).mip?.alphaScale;
+};
+const onSetMipParam = (
+  i: number,
+  payload: { key: 'thresholdSurfaceMip' | 'depthSurfaceMip' | 'alphaScale'; value: number },
+) => {
+  if (!isAnyVolumeBox(i)) return;
+  const info = imageBoxInfos.value[i] as VolumeImageBoxInfo;
+  if (!info.mip) return;
+  info.mip[payload.key] = payload.value;
+  showImage(i);
+};
+const onTitlebarMakeMpr = (i: number, plane: 'axi' | 'cor' | 'sag' = 'axi') => {
   if (!isDicomSliceImageBoxInfo(i)) return;
   const info = getDicomSliceImageBoxInfo(i);
   const seriesIdx = info.currentSeriesNumber;
   if (seriesIdx < 0 || seriesIdx >= seriesList.length) return;
   if (!seriesList[seriesIdx].myDicom || seriesList[seriesIdx].myDicom!.length === 0) return;
-  // box i (= 操作中の box) を Volume 化。window/CLUT は mpr_ 内で旧 box の値を継承するので
+  // box i (= 操作中の box) を Volume 化。mpr_ 内で旧 box の wc/ww/CLUT を継承するので
   // CT lung window 等が PT 既定 (3/6) に書き換わる事故が起きない。
   mpr_(seriesIdx, i);
+  // 指定 plane に切替 (default = axi)。axi のままなら setPlaneOnBox の noop。
+  if (plane !== 'axi') setPlaneOnBox(i, plane);
   showImage(i);
 };
 
@@ -1820,9 +1881,38 @@ const mouseMove = (e: MouseEvent) => {
 
   if (leftButtonFunction.value == "page") {
     if (e.buttons == 1) {
-      // page tool drag も plane-aware
-      doOneOrAllSamePlane(id, (i:number) => changeSlice(i, e.movementY));
-      show();
+      const srcInfo = imageBoxInfos.value[id] as VolumeImageBoxInfo | undefined;
+      if (srcInfo?.isVr) {
+        // VR: trackball 自由回転。
+        //   左右 drag (movementX): camera up 軸 (vecy) 周りに回転 → vecx, vecz を回す
+        //   上下 drag (movementY): camera right 軸 (vecx) 周りに回転 → vecy, vecz を回す
+        //   Shift+drag movementX: camera forward 軸 (vecz) 周りに roll → vecx, vecy を回す
+        const dx = e.movementX, dy = e.movementY;
+        const rotSpeed = 0.005;    // rad / pixel
+        const yaw   = dx * rotSpeed;
+        const pitch = dy * rotSpeed;
+        const roll  = e.shiftKey ? dx * rotSpeed : 0;
+        const upAxis    = srcInfo.vecy.clone().normalize();
+        const rightAxis = srcInfo.vecx.clone().normalize();
+        const fwdAxis   = srcInfo.vecz.clone().normalize();
+        if (yaw !== 0 && !e.shiftKey) {
+          srcInfo.vecx.applyAxisAngle(upAxis, yaw);
+          srcInfo.vecz.applyAxisAngle(upAxis, yaw);
+        }
+        if (pitch !== 0) {
+          srcInfo.vecy.applyAxisAngle(rightAxis, pitch);
+          srcInfo.vecz.applyAxisAngle(rightAxis, pitch);
+        }
+        if (roll !== 0) {
+          srcInfo.vecx.applyAxisAngle(fwdAxis, roll);
+          srcInfo.vecy.applyAxisAngle(fwdAxis, roll);
+        }
+        showImage(id);
+      } else {
+        // page tool drag は MIP/sMIP/通常スライスでは plane-aware paging
+        doOneOrAllSamePlane(id, (i:number) => changeSlice(i, e.movementY));
+        show();
+      }
     }
   }
 
@@ -2955,7 +3045,11 @@ const showImage = (i:number) => {
         const centerY = info.centerY;
         
         if (info.zoom == null){
-          info.zoom = imageBoxW.value! / rows;
+          // 「box 内に画像が全部収まる最大 zoom」: 横と縦の制約のうち厳しい方を採用。
+          // box が縦長 / 画像が縦長でも切れず、aspect は維持。
+          const fitW = (imageBoxW.value ?? 1) / cols;
+          const fitH = (imageBoxH.value ?? 1) / rows;
+          info.zoom = Math.min(fitW, fitH);
         }
         const zoom = info.zoom;
 
@@ -3009,10 +3103,15 @@ const showImage = (i:number) => {
     const clut = cluts[info.clut];
 
     if (info.isVr){
-      // Volume Rendering: front-to-back composite ray casting
-      const angle = info.mip?.mipAngle ?? 0;
+      // Volume Rendering: 自由回転対応 ray-cast。vForward = box の vecz を world→voxel
+      // 変換した through-plane 1 step ベクトル (mm 単位)。maxSteps は volume の対角長で十分。
+      const aScale = info.mip?.alphaScale ?? 0.06;
+      const screenOrigin = screenToWorld(i, 0, 0);
+      const stepWorld = info.vecz.clone().normalize();   // 1 mm step
+      const vForward = worldToVoxel_(screenOrigin.clone().add(stepWorld), j).sub(p00);
+      const maxSteps = Math.ceil(Math.sqrt(nx*nx + ny*ny + nz*nz) * 1.2);
       imb.value![i].drawNiftiVR(pixelData0, nx, ny, nz, wc!, ww!,
-        p00, v01, v10, angle, clut, mipFastBoxes.has(i));
+        p00, v01, v10, vForward, maxSteps, clut, mipFastBoxes.has(i), aScale);
     } else if (!info.isMip){
         // CT 寝台除去: この volume が CT で、segStore に body mask があれば適用
         // Pinia Proxy 回避のため seriesUID で照合 (voxel TypedArray 同一でも可)
@@ -3025,7 +3124,7 @@ const showImage = (i:number) => {
           ? segStore.ctBodyMask
           : undefined;
         imb.value![i].drawNiftiSlice(pixelData0,nx,ny,nz, wc!, ww!, p00,v01,v10,clut,
-          buildMaskOverlayForBox(i), ctBodyMask);
+          buildMaskOverlayForBox(i), ctBodyMask, info.interpolation ?? 'bilinear');
       }else{
       const angle = info.mip!.mipAngle;
       // MIP の対象 volume が PET と一致する場合のみマスク overlay を渡す
@@ -3105,6 +3204,8 @@ const showImage = (i:number) => {
         undefined,
         fusionCtBodyMask,
         info.overlayAlpha ?? 0.5,
+        info.interpolation ?? 'bilinear',
+        info.interpolation1 ?? 'bilinear',
       );
     }
   }
@@ -4555,6 +4656,11 @@ defineExpose({
         :crosshair-y="getBoxCrosshairY(i-1)"
         :sync-enabled="isBoxSyncEnabled(i-1)"
         :global-sync-on="!!syncImageBox"
+        :interpolation="getBoxInterpolation(i-1)"
+        :interpolation1="getBoxInterpolation1(i-1)"
+        :mip-threshold="getBoxMipThreshold(i-1)"
+        :mip-depth="getBoxMipDepth(i-1)"
+        :mip-alpha-scale="getBoxMipAlphaScale(i-1)"
         @close-box="onTitlebarClose(i-1)"
         @reset-view="onTitlebarResetView(i-1)"
         @set-plane="(p: 'axi'|'cor'|'sag'|'mip'|'smip'|'vr') => onTitlebarSetPlane(i-1, p)"
@@ -4562,7 +4668,7 @@ defineExpose({
         @toggle-sync="onTitlebarToggleSync(i-1)"
         @maximize="onTitlebarMaximize(i-1)"
         @toggle-overlay="onTitlebarToggleOverlay(i-1)"
-        @make-mpr="onTitlebarMakeMpr(i-1)"
+        @make-mpr="(plane: 'axi' | 'cor' | 'sag') => onTitlebarMakeMpr(i-1, plane)"
         @save-volume-nifti="onTitlebarSaveVolumeNifti(i-1)"
         @modality-drag-start="(e: DragEvent) => onModalityDragStart(e, i-1)"
         :overlay-alpha="getBoxOverlayAlpha(i-1)"
@@ -4574,6 +4680,8 @@ defineExpose({
         @duplicate-box="onTitlebarDuplicate(i-1)"
         :active-window-layer="getBoxActiveWindowLayer(i-1)"
         @set-active-window-layer="(l: 'base' | 'overlay') => onSetActiveWindowLayer(i-1, l)"
+        @set-interpolation="(p: { layer: 'base'|'overlay'; mode: 'nearest'|'bilinear' }) => onSetInterpolation(i-1, p)"
+        @set-mip-param="(p: { key: 'thresholdSurfaceMip' | 'depthSurfaceMip' | 'alphaScale'; value: number }) => onSetMipParam(i-1, p)"
       />
     </div>
 

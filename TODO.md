@@ -204,6 +204,30 @@ ONNX 化のハードルが高く、ユーザ判断で中止。`segmentation/medS
 セット候補: WebGPU MI + abort UI (1h) + 手動 nudge UI (3-5h)。合計 14-21h。
 現状ユーザ需要は低いので保留。
 
+### 遠い将来の夢: 骨シンチ (planar) + CT 2D fusion
+
+ユーザ提案 (2026-05-04):
+- 骨シンチ = 平面像 (anterior/posterior 1 枚 or 2 枚)。DICOM だけでなく PNG/JPG で配布される
+  ことも多い。
+- CT volume を coronal MIP / sum projection で 2D 化 → 同じ平面に並べる。
+- 2D mutual information で 2 画像を rigid (translation + scale + rotation) に整合。
+- アウトプット: 骨シンチに hot spot がある場所を CT 上で局在化。
+
+実装スケッチ:
+- `loadFiles` を PNG/JPG 拡張。`createImageBitmap(file)` → canvas → grayscale Float32Array。
+  既存 NIfTI/DICOM 経路と分離した 2D-only 系統が必要 (Volume ではないので Box は DicomSlice
+  or 専用の "PlanarBox" を新設)。
+- CT 2D 化: 既存 drawNiftiMip (sum or max projection) の出力を Float32Array で取り出す。
+- 2D MI: 既存 src/components/registration/mi.ts の 3D ロジックを 2D に縮退 (sample 点を
+  z = 1 に固定)。32-bin joint hist。3-DOF (tx, ty, rotation) optimizer。affine 化なら 6-DOF。
+- UI: PNG/JPG drag & drop accept、整合ボタン → 結果プレビュー。
+
+**さらに遠い夢**: 骨ごとに rigid。CT を骨 segmentation (例: TotalSegmentator の bone 出力 or
+own threshold) → 各骨を独立に剛体移動 → 2D 投影で骨シンチに合わせ込み。
+- 必要技術: 多体 rigid + 制約 (隣接骨は近接維持)、または bone-by-bone deformable like
+  ICP variant。
+- 工数想定: 50-100h、複雑系。論文・実装も少ない。
+
 ### Dosimetry (single-timepoint simplified, 次セッション)
 ユーザ確認済: single-timepoint approximation (6-10h)。
 
