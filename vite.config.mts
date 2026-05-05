@@ -132,4 +132,26 @@ export default defineConfig({
   server: {
     port: 3000,
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // Manual chunk: 重い依存を main bundle から分離 → 初回ロード短縮 + 並列 fetch。
+        // - vue / vuetify は core (毎回必要) なのでデフォルトのまま (vendor)
+        // - dicom-parser / nifti-reader-js / dcmjs-codecs は file ロード時のみ必要
+        // - three は VR/MIP 等 volume 描画時のみ
+        // - jpeg-lossless-decoder-js は JPEG Lossless DICOM のみ
+        // - fflate / pako は gzip 解凍 (現在は native DecompressionStream 優先のため fallback のみ)
+        manualChunks: {
+          'vendor-vue': ['vue', 'pinia'],
+          'vendor-vuetify': ['vuetify'],
+          'vendor-three': ['three'],
+          'vendor-dicom-parser': ['dicom-parser'],
+          'vendor-jpeg-lossless': ['jpeg-lossless-decoder-js'],
+          'vendor-dcmjs-codecs': ['dcmjs-codecs'],   // ~800KB、JPEG Lossless WASM
+          'vendor-nifti': ['nifti-reader-js', 'fflate'],
+        },
+      },
+    },
+    chunkSizeWarningLimit: 900,    // dcmjs-codecs chunk が ~800KB
+  },
 })

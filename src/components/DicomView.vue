@@ -108,6 +108,7 @@ import { sphereStatsInPet, fillPolygonOnSlice, findMaximumAxis as maxAxis } from
 import { TRACER_PRESETS, tracerById, detectTracer, type TracerPreset } from './tracerPresets';
 import { buildOpacityLut, DEFAULT_TF, TF_PRESETS } from './vrTf';
 import { VrDemo } from './vrDemo';
+import { encodeViewState, decodeViewState, type SerializedViewState, type SerializedBoxState } from './viewStateUrl';
 import SegmentationPanel from './SegmentationPanel.vue';
 import DebugInspector from './DebugInspector.vue';
 import { computed, onMounted, nextTick, provide } from 'vue';
@@ -373,6 +374,9 @@ onMounted(() => {
     if (p.get('debug') === '1') debugMode.value = true;
     const devCase = p.get('dev');
     if (devCase) loadDevCase(devCase);
+    // ?demo=<id>: production-build にも入る公開デモデータ (public/demo/<id>/manifest.json)
+    const demoCase = p.get('demo');
+    if (demoCase) loadDemoCase(demoCase);
     // ?test=parity: multiplebonemets を auto load + PET Standard layout を組む
     if (p.get('test') === 'parity') {
       // ロード→自動レイアウトが終わってから PET Standard を強制起動。
@@ -407,6 +411,23 @@ onMounted(() => {
         }
       }
       if (all.length > 0) loadFromExternalUrls(all);
+    }
+    // ?state=...: layout / view パラメータを復元 (?url= や ?dev= とセットで使う想定)。
+    // ロード完了 (isLoading false) 後に apply。
+    const stateStr = p.get('state');
+    if (stateStr) {
+      const state = decodeViewState(stateStr);
+      if (state) {
+        const stop = watch(isLoading, async (v) => {
+          if (v === false) {
+            stop();
+            await nextTick();
+            applyViewState(state);
+          }
+        });
+      } else {
+        console.warn('[state] malformed view-state in URL, ignoring');
+      }
     }
   } catch {}
   window.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -457,6 +478,50 @@ const loadDevCase = async (caseId: string) => {
     loadFiles(files.filter(Boolean));
   } catch (err) {
     console.warn('[dev-case] failed', err);
+  }
+};
+
+// ?demo=<id>: production build にも入る公開デモデータ。
+//   public/demo/<id>/manifest.json   → { "files": ["ct.nii.gz", "pet.nii.gz"], "description": "..." }
+//   public/demo/<id>/<file>          → 実体
+// dev-case と違い vite middleware を通さず static 配信なので GitHub Pages でも動く。
+// base path は import.meta.env.BASE_URL を使う (vite.config.mts の base= '/metavol-web-beta/')。
+const loadDemoCase = async (caseId: string) => {
+  try {
+    const base = (import.meta.env?.BASE_URL ?? '/').replace(/\/$/, '');
+    const manifestUrl = `${base}/demo/${encodeURIComponent(caseId)}/manifest.json`;
+    const mf = await fetch(manifestUrl);
+    if (!mf.ok) {
+      console.warn(`[demo] manifest not found: ${manifestUrl} (HTTP ${mf.status})`);
+      alert(`Demo case "${caseId}" not found. Place public/demo/${caseId}/manifest.json + files.`);
+      return;
+    }
+    const manifest = await mf.json() as { files: string[]; description?: string };
+    if (!Array.isArray(manifest.files) || manifest.files.length === 0) {
+      console.warn(`[demo] manifest has no files`);
+      return;
+    }
+    console.log(`[demo] loading ${manifest.files.length} files for "${caseId}"...`);
+    const t0 = performance.now();
+    const files: File[] = [];
+    const concurrency = Math.min(4, manifest.files.length);
+    let idx = 0;
+    const workers = Array.from({ length: concurrency }, async () => {
+      while (idx < manifest.files.length) {
+        const my = idx++;
+        const name = manifest.files[my];
+        const r = await fetch(`${base}/demo/${encodeURIComponent(caseId)}/${name.split('/').map(encodeURIComponent).join('/')}`);
+        if (!r.ok) { console.warn(`[demo] fetch failed: ${name}`); continue; }
+        const buf = await r.arrayBuffer();
+        files[my] = new File([buf], name.split('/').pop() ?? name, { type: 'application/octet-stream' });
+      }
+    });
+    await Promise.all(workers);
+    const t1 = performance.now();
+    console.log(`[demo] fetched ${files.length} files in ${(t1 - t0).toFixed(0)}ms`);
+    loadFiles(files.filter(Boolean));
+  } catch (err) {
+    console.warn('[demo] failed', err);
   }
 };
 
@@ -1415,6 +1480,97 @@ const onSetVrShading = (
   if (payload.key === 'enabled') sh.enabled = !!payload.value;
   else (sh as any)[payload.key] = Number(payload.value);
   showImage(i);
+};
+
+// ===== View state URL (B9: ?state=...) =====
+// 現在の layout を SerializedViewState に圧縮 → URL 用 base64 を返す。
+// 「Copy share URL」ボタン経由で呼ばれる想定。
+const serializeCurrentViewState = (): SerializedViewState => {
+  const bs: SerializedBoxState[] = [];
+  for (let i = 0; i < (tileN.value ?? 0); i++) {
+    const info = imageBoxInfos.value[i] as any;
+    if (!info) continue;
+    const isDicom = isDicomSliceImageBoxInfo(i);
+    const isFusion = isFusedImageBoxInfo(i);
+    const isMip = !isDicom && info.isMip;
+    const k = isDicom ? 'd' : isFusion ? 'f' : isMip ? 'm' : 'v';
+    const b: SerializedBoxState = {
+      k,
+      s: info.currentSeriesNumber ?? 0,
+      wc: info.myWC ?? undefined,
+      ww: info.myWW ?? undefined,
+      c: info.clut,
+    };
+    if (!isDicom) b.p = getBoxCurrentPlane(i) ?? undefined;
+    if (info.interpolation) b.in = info.interpolation === 'nearest' ? 'n' : 'b';
+    if (isFusion) {
+      b.s1 = info.currentSeriesNumber1;
+      b.wc1 = info.myWC1 ?? undefined;
+      b.ww1 = info.myWW1 ?? undefined;
+      b.c1 = info.clut1;
+      b.oa = info.overlayAlpha;
+      if (info.interpolation1) b.in1 = info.interpolation1 === 'nearest' ? 'n' : 'b';
+    }
+    if (info.mip) {
+      if (info.mip.mipAngle) b.mipAngle = info.mip.mipAngle;
+      if (info.mip.thresholdSurfaceMip != null) b.surfThresh = info.mip.thresholdSurfaceMip;
+      if (info.mip.depthSurfaceMip != null) b.surfDepth = info.mip.depthSurfaceMip;
+      if (info.mip.alphaScale != null) b.alphaScale = info.mip.alphaScale;
+      if (info.mip.vrOpacityPresetId) b.vrPreset = info.mip.vrOpacityPresetId;
+    }
+    bs.push(b);
+  }
+  return { v: 1, t: tileN.value ?? 0, sync: !!syncImageBox.value, bs };
+};
+
+const buildShareUrl = (): string => {
+  const state = serializeCurrentViewState();
+  const code = encodeViewState(state);
+  const u = new URL(window.location.href);
+  u.searchParams.set('state', code);
+  return u.toString();
+};
+
+const applyViewState = (state: SerializedViewState) => {
+  if (!state || state.bs.length === 0) return;
+  // tileN を合わせる
+  const newTileN = Math.min(state.t, state.bs.length);
+  for (let i = 0; i < newTileN; i++) {
+    const sb = state.bs[i];
+    const info = imageBoxInfos.value[i] as any;
+    if (!info) continue;
+    if (sb.s != null) info.currentSeriesNumber = sb.s;
+    if (sb.wc != null) info.myWC = sb.wc;
+    if (sb.ww != null) info.myWW = sb.ww;
+    if (sb.c != null) info.clut = sb.c;
+    if (sb.in) info.interpolation = sb.in === 'n' ? 'nearest' : 'bilinear';
+    // Fusion 化が必要な場合 (clut1 を持つ box への変換) は MVP では未対応 — 保存元と同 layout 前提
+    if (sb.s1 != null) info.currentSeriesNumber1 = sb.s1;
+    if (sb.wc1 != null) info.myWC1 = sb.wc1;
+    if (sb.ww1 != null) info.myWW1 = sb.ww1;
+    if (sb.c1 != null) info.clut1 = sb.c1;
+    if (sb.oa != null) info.overlayAlpha = sb.oa;
+    if (sb.in1) info.interpolation1 = sb.in1 === 'n' ? 'nearest' : 'bilinear';
+    // plane 切替
+    if (sb.p && isAnyVolumeBox(i)) {
+      setPlaneOnBox(i, sb.p as any);
+    }
+    // MIP/VR params
+    if (info.mip) {
+      if (sb.mipAngle != null) info.mip.mipAngle = sb.mipAngle;
+      if (sb.surfThresh != null) info.mip.thresholdSurfaceMip = sb.surfThresh;
+      if (sb.surfDepth != null) info.mip.depthSurfaceMip = sb.surfDepth;
+      if (sb.alphaScale != null) info.mip.alphaScale = sb.alphaScale;
+      if (sb.vrPreset) {
+        info.mip.vrOpacityPresetId = sb.vrPreset;
+        const preset = TF_PRESETS.find(pp => pp.id === sb.vrPreset);
+        if (preset) info.mip.vrOpacityTF = preset.tf.map(p => ({ ...p }));
+      }
+    }
+  }
+  if (state.sync != null) syncImageBox.value = state.sync;
+  show();
+  console.log(`[state] applied view state: ${newTileN} boxes`);
 };
 
 // ===== VR auto demo =====
@@ -4628,6 +4784,8 @@ defineExpose({
   niftiGunzipInProgress,
   niftiGunzipName,
   niftiGunzipBytes,
+  // View state share URL ビルダー (?state=...)
+  buildShareUrl,
   // NIfTI header viewer 用
   getNiftiHeaderForSeries: (idx: number) => {
     if (idx < 0 || idx >= seriesList.length) return null;

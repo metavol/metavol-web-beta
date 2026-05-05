@@ -524,6 +524,16 @@
         class="mv-tool-btn"
         variant="text"
         size="small"
+        @click="onCopyShareUrl"
+      >
+        <v-icon icon="mdi-share-variant-outline" />
+        <v-tooltip activator="parent" location="bottom">{{ shareCopiedMsg || 'Copy share URL (current view)' }}</v-tooltip>
+      </v-btn>
+
+      <v-btn
+        class="mv-tool-btn"
+        variant="text"
+        size="small"
         color="error"
         @click="closingImages = true"
       >
@@ -841,6 +851,20 @@ const jpegProgress = computed(() => {
   const percent = total > 0 ? (done / total) * 100 : 0;
   return { inProgress, done, total, percent };
 });
+
+// "Copy share URL" — 現在 layout を URL ?state= に encode してクリップボード。
+const shareCopiedMsg = ref<string>('');
+const onCopyShareUrl = async () => {
+  const url = dicomViewRef.value?.buildShareUrl?.();
+  if (!url) { shareCopiedMsg.value = 'No view to share'; setTimeout(() => shareCopiedMsg.value = '', 2000); return; }
+  try {
+    await navigator.clipboard.writeText(url);
+    shareCopiedMsg.value = 'Copied!';
+  } catch {
+    try { window.prompt('Copy this URL:', url); shareCopiedMsg.value = 'Shown'; } catch {}
+  }
+  setTimeout(() => shareCopiedMsg.value = '', 2000);
+};
 
 // nii.gz gunzip 進捗 (累計 MB)。最終サイズは gzip 形式上事前取得困難のため進捗 % は出さず
 // 「currently X MB processed」表示 + indeterminate bar。
