@@ -42,6 +42,18 @@ export type VolumeImageBoxInfo = ImageBoxInfoBase & {
         // VR opacity ramp の倍率 (default 0.06)。alphaScale ↑ で不透明、↓ で透けやすい。
         // VR にも MIP にも mip オブジェクトを共用してるのでここに置く。
         alphaScale?: number,
+        // VR opacity transfer function (control points 配列)。null/undefined の場合は ramp。
+        // 詳細は src/components/vrTf.ts。
+        vrOpacityTF?: { v: number; a: number }[],
+        vrOpacityPresetId?: string,
+        // VR Phong shading (Phase B)。enabled=false で旧 ramp 描画と一致。
+        vrShading?: {
+            enabled: boolean,
+            ambient: number,        // 0..1
+            diffuse: number,        // 0..1
+            specularInt: number,    // 0..1
+            specularPower: number,  // 1..128
+        },
     } | null,
     // Volume Rendering (front-to-back composite)。MIP/sMIP と排他: isVr=true のとき isMip=false
     isVr?: boolean,

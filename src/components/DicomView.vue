@@ -106,6 +106,8 @@ import { useSegmentationStore } from '../stores/segmentation';
 import { usePerfStore } from '../stores/perf';
 import { sphereStatsInPet, fillPolygonOnSlice, findMaximumAxis as maxAxis } from './segmentation/maskOps';
 import { TRACER_PRESETS, tracerById, detectTracer, type TracerPreset } from './tracerPresets';
+import { buildOpacityLut, DEFAULT_TF, TF_PRESETS } from './vrTf';
+import { VrDemo } from './vrDemo';
 import SegmentationPanel from './SegmentationPanel.vue';
 import DebugInspector from './DebugInspector.vue';
 import { computed, onMounted, nextTick, provide } from 'vue';
@@ -1366,7 +1368,92 @@ const onSetMipParam = (
   info.mip[payload.key] = payload.value;
   showImage(i);
 };
-const onTitlebarMakeMpr = (i: number, plane: 'axi' | 'cor' | 'sag' = 'axi') => {
+
+// VR TF preset 切替: vrOpacityTF と vrOpacityPresetId を更新、suggestedAlphaScale も推奨値に。
+const getBoxVrTfPresetId = (i: number): string | undefined => {
+  if (!isAnyVolumeBox(i)) return undefined;
+  return (imageBoxInfos.value[i] as VolumeImageBoxInfo).mip?.vrOpacityPresetId;
+};
+const vrTfPresetsView = TF_PRESETS.map(p => ({ id: p.id, label: p.label, description: p.description }));
+const onSetVrTfPreset = (i: number, presetId: string) => {
+  if (!isAnyVolumeBox(i)) return;
+  const info = imageBoxInfos.value[i] as VolumeImageBoxInfo;
+  if (!info.mip) return;
+  const preset = TF_PRESETS.find(p => p.id === presetId);
+  if (!preset) return;
+  info.mip.vrOpacityTF = preset.tf.map(pt => ({ ...pt }));
+  info.mip.vrOpacityPresetId = presetId;
+  // 推奨 alphaScale もセット (preset 切替時の良い既定値)
+  info.mip.alphaScale = preset.suggestedAlphaScale;
+  showImage(i);
+};
+
+// Phase B: shading 状態の getter / setter
+const ensureVrShading = (i: number) => {
+  if (!isAnyVolumeBox(i)) return null;
+  const info = imageBoxInfos.value[i] as VolumeImageBoxInfo;
+  if (!info.mip) return null;
+  if (!info.mip.vrShading) {
+    info.mip.vrShading = {
+      enabled: false, ambient: 0.3, diffuse: 0.7, specularInt: 0.4, specularPower: 16,
+    };
+  }
+  return info.mip.vrShading;
+};
+const getVrShadingField = (i: number, key: 'enabled' | 'ambient' | 'diffuse' | 'specularInt' | 'specularPower') => {
+  if (!isAnyVolumeBox(i)) return undefined;
+  const sh = (imageBoxInfos.value[i] as VolumeImageBoxInfo).mip?.vrShading;
+  if (!sh) return undefined;
+  return sh[key];
+};
+const onSetVrShading = (
+  i: number,
+  payload: { key: 'enabled' | 'ambient' | 'diffuse' | 'specularInt' | 'specularPower'; value: number | boolean },
+) => {
+  const sh = ensureVrShading(i);
+  if (!sh) return;
+  if (payload.key === 'enabled') sh.enabled = !!payload.value;
+  else (sh as any)[payload.key] = Number(payload.value);
+  showImage(i);
+};
+
+// ===== VR auto demo =====
+// VrDemo は box 単位でしか持たないので、現在再生中の box id と controller 1 つ。
+const vrDemoBoxId = ref<number>(-1);
+let vrDemoController: VrDemo | null = null;
+const onToggleVrDemo = (i: number) => {
+  if (!isAnyVolumeBox(i)) return;
+  const info = imageBoxInfos.value[i] as VolumeImageBoxInfo;
+  if (!info.isVr) return;
+  if (vrDemoController?.isRunning() && vrDemoBoxId.value === i) {
+    // stop
+    vrDemoController.stop();
+    return;
+  }
+  // 別 box が走ってれば止めてから新規開始
+  if (vrDemoController?.isRunning()) vrDemoController.stop();
+  vrDemoBoxId.value = i;
+  vrDemoController = new VrDemo(
+    {
+      onFrame: () => showImage(i),
+      onStop: () => { vrDemoBoxId.value = -1; },
+    },
+    (id: string) => {
+      const preset = TF_PRESETS.find(p => p.id === id);
+      return preset ? preset.tf.map(p => ({ ...p })) : null;
+    },
+  );
+  vrDemoController.start({
+    info,
+    isFusion: isFusedImageBoxInfo(i),
+    resolvePresetTF: (id) => {
+      const preset = TF_PRESETS.find(p => p.id === id);
+      return preset ? preset.tf.map(p => ({ ...p })) : null;
+    },
+  });
+};
+const isVrDemoRunningOnBox = (i: number) => vrDemoController?.isRunning() && vrDemoBoxId.value === i;
+const onTitlebarMakeMpr = (i: number, plane: 'axi' | 'cor' | 'sag' | 'mip' | 'smip' | 'vr' = 'axi') => {
   if (!isDicomSliceImageBoxInfo(i)) return;
   const info = getDicomSliceImageBoxInfo(i);
   const seriesIdx = info.currentSeriesNumber;
@@ -3046,9 +3133,13 @@ const showImage = (i:number) => {
         
         if (info.zoom == null){
           // 「box 内に画像が全部収まる最大 zoom」: 横と縦の制約のうち厳しい方を採用。
-          // box が縦長 / 画像が縦長でも切れず、aspect は維持。
+          // 注意: 縦は box 全体高 imageBoxH ではなく titlebar (22px) を引いた表示領域。
+          //   canvas の buffer は box 全体高だが visible 部分は titlebar より下なので、
+          //   titlebar 高を引かないと下端 22px が画面外にはみ出す。
+          //   .mv-titlebar の CSS height = 22px と一致させる。
+          const TITLEBAR_PX = 22;
           const fitW = (imageBoxW.value ?? 1) / cols;
-          const fitH = (imageBoxH.value ?? 1) / rows;
+          const fitH = Math.max(1, ((imageBoxH.value ?? 1) - TITLEBAR_PX)) / rows;
           info.zoom = Math.min(fitW, fitH);
         }
         const zoom = info.zoom;
@@ -3110,8 +3201,12 @@ const showImage = (i:number) => {
       const stepWorld = info.vecz.clone().normalize();   // 1 mm step
       const vForward = worldToVoxel_(screenOrigin.clone().add(stepWorld), j).sub(p00);
       const maxSteps = Math.ceil(Math.sqrt(nx*nx + ny*ny + nz*nz) * 1.2);
+      // VR opacity TF: control points → 256-entry LUT。preset 既定は ramp。
+      const tf = info.mip?.vrOpacityTF ?? DEFAULT_TF;
+      const opacityLut = buildOpacityLut(tf);
+      const shading = info.mip?.vrShading;
       imb.value![i].drawNiftiVR(pixelData0, nx, ny, nz, wc!, ww!,
-        p00, v01, v10, vForward, maxSteps, clut, mipFastBoxes.has(i), aScale);
+        p00, v01, v10, vForward, maxSteps, clut, opacityLut, mipFastBoxes.has(i), aScale, shading);
     } else if (!info.isMip){
         // CT 寝台除去: この volume が CT で、segStore に body mask があれば適用
         // Pinia Proxy 回避のため seriesUID で照合 (voxel TypedArray 同一でも可)
@@ -4661,6 +4756,14 @@ defineExpose({
         :mip-threshold="getBoxMipThreshold(i-1)"
         :mip-depth="getBoxMipDepth(i-1)"
         :mip-alpha-scale="getBoxMipAlphaScale(i-1)"
+        :vr-tf-preset-id="getBoxVrTfPresetId(i-1)"
+        :vr-tf-presets="vrTfPresetsView"
+        :vr-shading-enabled="!!getVrShadingField(i-1, 'enabled')"
+        :vr-shading-ambient="getVrShadingField(i-1, 'ambient')"
+        :vr-shading-diffuse="getVrShadingField(i-1, 'diffuse')"
+        :vr-shading-spec-int="getVrShadingField(i-1, 'specularInt')"
+        :vr-shading-spec-power="getVrShadingField(i-1, 'specularPower')"
+        :vr-demo-running="isVrDemoRunningOnBox(i-1)"
         @close-box="onTitlebarClose(i-1)"
         @reset-view="onTitlebarResetView(i-1)"
         @set-plane="(p: 'axi'|'cor'|'sag'|'mip'|'smip'|'vr') => onTitlebarSetPlane(i-1, p)"
@@ -4668,7 +4771,7 @@ defineExpose({
         @toggle-sync="onTitlebarToggleSync(i-1)"
         @maximize="onTitlebarMaximize(i-1)"
         @toggle-overlay="onTitlebarToggleOverlay(i-1)"
-        @make-mpr="(plane: 'axi' | 'cor' | 'sag') => onTitlebarMakeMpr(i-1, plane)"
+        @make-mpr="(plane: 'axi' | 'cor' | 'sag' | 'mip' | 'smip' | 'vr') => onTitlebarMakeMpr(i-1, plane)"
         @save-volume-nifti="onTitlebarSaveVolumeNifti(i-1)"
         @modality-drag-start="(e: DragEvent) => onModalityDragStart(e, i-1)"
         :overlay-alpha="getBoxOverlayAlpha(i-1)"
@@ -4682,6 +4785,9 @@ defineExpose({
         @set-active-window-layer="(l: 'base' | 'overlay') => onSetActiveWindowLayer(i-1, l)"
         @set-interpolation="(p: { layer: 'base'|'overlay'; mode: 'nearest'|'bilinear' }) => onSetInterpolation(i-1, p)"
         @set-mip-param="(p: { key: 'thresholdSurfaceMip' | 'depthSurfaceMip' | 'alphaScale'; value: number }) => onSetMipParam(i-1, p)"
+        @set-vr-tf-preset="(id: string) => onSetVrTfPreset(i-1, id)"
+        @set-vr-shading="(p: { key: 'enabled'|'ambient'|'diffuse'|'specularInt'|'specularPower'; value: number | boolean }) => onSetVrShading(i-1, p)"
+        @toggle-vr-demo="onToggleVrDemo(i-1)"
       />
     </div>
 

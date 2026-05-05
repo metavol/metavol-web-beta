@@ -12,19 +12,21 @@
 export const VR_SHADER_WGSL = /* wgsl */ `
 struct Params {
   dims: vec4<i32>,         // nx, ny, nz, maxSteps (ray sample count)
-  outAndMode: vec4<i32>,   // outW, outH, _, _
+  outAndMode: vec4<i32>,   // outW, outH, shadingEnabled (0/1), _
   p00: vec4<f32>,
   v01: vec4<f32>,
   v10: vec4<f32>,
   vForward: vec4<f32>,     // through-plane voxel-step vector (= camera forward × step size)
-  rotWC: vec4<f32>,        // _, _, wc, ww
-  vrParams: vec4<f32>,     // alphaScale, _, _, _
+  shadeWcWw: vec4<f32>,    // specularIntensity, specularPower, wc, ww
+  vrParams: vec4<f32>,     // alphaScale, ambient, diffuse, _
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var volumeTex: texture_3d<f32>;
 @group(0) @binding(2) var<storage, read> clut: array<vec4<f32>>;
 @group(0) @binding(3) var outTex: texture_storage_2d<rgba8unorm, write>;
+// 256-entry opacity LUT。vrTf.buildOpacityLut の出力。 default は (0..1) ramp。
+@group(0) @binding(4) var<storage, read> opacityLut: array<f32>;
 
 // 自由回転対応: ray-cast の方向は P.vForward (through-plane voxel-step vector)。
 // 旧版は z 軸固定 + (cosA, sinA) で x'-y' 平面内 rotation だったが、自由回転では
@@ -49,9 +51,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let py0 = P.p00.y + cyf * P.v01.y + cxf * P.v10.y;
   let pz0 = P.p00.z + cyf * P.v01.z + cxf * P.v10.z;
 
-  let ww = P.rotWC.w;
-  let lo = P.rotWC.z - ww * 0.5;
+  let ww = P.shadeWcWw.w;
+  let lo = P.shadeWcWw.z - ww * 0.5;
   let alphaScale = P.vrParams.x;
+  let shadingEnabled = P.outAndMode.z == 1;
+  let ambient = P.vrParams.y;
+  let diffuse = P.vrParams.z;
+  let specInt = P.shadeWcWw.x;
+  let specPower = max(P.shadeWcWw.y, 1.0);
+  // 簡易 head-light: L = -vForward (camera から物体への方向の逆 = 視線反対 = カメラ位置への方向)
+  let lightDir = normalize(-vec3<f32>(P.vForward.x, P.vForward.y, P.vForward.z));
 
   var dr: f32 = 0.0;
   var dg: f32 = 0.0;
@@ -72,14 +81,38 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var p = (v - lo) / ww;
     if (p < 0.0) { continue; }
     if (p > 1.0) { p = 1.0; }
-    let alpha = p * alphaScale;
-    if (alpha < 0.002) { continue; }
     let cidx = i32(min(255.0, floor(p * 255.0)));
+    let alpha = opacityLut[cidx] * alphaScale;
+    if (alpha < 0.002) { continue; }
     let c = clut[cidx];
+    var rgb = vec3<f32>(c.r, c.g, c.b);
+    if (shadingEnabled) {
+      let xm = max(ix - 1, 0);
+      let xp = min(ix + 1, nx - 1);
+      let ym = max(iy - 1, 0);
+      let yp = min(iy + 1, ny - 1);
+      let zm = max(iz - 1, 0);
+      let zp = min(iz + 1, nz - 1);
+      let gx = textureLoad(volumeTex, vec3<i32>(xp, iy, iz), 0).r - textureLoad(volumeTex, vec3<i32>(xm, iy, iz), 0).r;
+      let gy = textureLoad(volumeTex, vec3<i32>(ix, yp, iz), 0).r - textureLoad(volumeTex, vec3<i32>(ix, ym, iz), 0).r;
+      let gz = textureLoad(volumeTex, vec3<i32>(ix, iy, zp), 0).r - textureLoad(volumeTex, vec3<i32>(ix, iy, zm), 0).r;
+      let g = vec3<f32>(gx, gy, gz);
+      let glen = length(g);
+      if (glen > 1.0e-6) {
+        let n = -g / glen;
+        let ndl = max(0.0, dot(n, lightDir));
+        let ndh = max(0.0, dot(n, lightDir));
+        let spec = pow(ndh, specPower) * specInt;
+        let lightI = ambient + diffuse * ndl + spec;
+        rgb = rgb * min(lightI, 1.5);
+      } else {
+        rgb = rgb * ambient;
+      }
+    }
     let transmit = 1.0 - da;
-    dr = dr + transmit * alpha * c.r;
-    dg = dg + transmit * alpha * c.g;
-    db = db + transmit * alpha * c.b;
+    dr = dr + transmit * alpha * rgb.r;
+    dg = dg + transmit * alpha * rgb.g;
+    db = db + transmit * alpha * rgb.b;
     da = da + transmit * alpha;
   }
 

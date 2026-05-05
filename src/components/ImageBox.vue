@@ -73,6 +73,18 @@ const prop = defineProps<{
   mipThreshold?: number;
   mipDepth?: number;
   mipAlphaScale?: number;
+  // VR Phase A: opacity transfer function preset id (vrTf.TF_PRESETS から)
+  vrTfPresetId?: string;
+  // 全 preset 選択肢 (UI 表示用、parent から渡す)
+  vrTfPresets?: { id: string; label: string; description: string }[];
+  // VR Phase B: Phong shading
+  vrShadingEnabled?: boolean;
+  vrShadingAmbient?: number;
+  vrShadingDiffuse?: number;
+  vrShadingSpecInt?: number;
+  vrShadingSpecPower?: number;
+  // VR demo: 再生中?
+  vrDemoRunning?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -83,7 +95,7 @@ const emit = defineEmits<{
   (e: 'toggleSync'): void;
   (e: 'maximize'): void;
   (e: 'toggleOverlay'): void;
-  (e: 'makeMpr', plane: 'axi' | 'cor' | 'sag'): void;
+  (e: 'makeMpr', plane: 'axi' | 'cor' | 'sag' | 'mip' | 'smip' | 'vr'): void;
   (e: 'saveVolumeNifti'): void;
   // Modality chip drag start: 親 (DicomView) が dataTransfer を埋めて fusion 起点にする
   (e: 'modalityDragStart', ev: DragEvent): void;
@@ -100,6 +112,12 @@ const emit = defineEmits<{
   (e: 'setInterpolation', payload: { layer: 'base' | 'overlay'; mode: 'nearest' | 'bilinear' }): void;
   // sMIP / VR のレンダリングパラメータ更新 (titlebar 歯車 popover)
   (e: 'setMipParam', payload: { key: 'thresholdSurfaceMip' | 'depthSurfaceMip' | 'alphaScale'; value: number }): void;
+  // VR Phase A: TF preset 切替
+  (e: 'setVrTfPreset', presetId: string): void;
+  // VR Phase B: shading 設定
+  (e: 'setVrShading', payload: { key: 'enabled' | 'ambient' | 'diffuse' | 'specularInt' | 'specularPower'; value: number | boolean }): void;
+  // VR demo: play / stop の toggle
+  (e: 'toggleVrDemo'): void;
 }>();
 
 // Fusion box の overlay clut が active か判定 (clut1 用)
@@ -961,8 +979,10 @@ const drawNiftiVR = async function(pix: Float32Array | Int16Array,
     vForward: THREE.Vector3,                                  // through-plane voxel-step
     maxSteps: number,                                         // ray sample 回数
     clut: number[][],
+    opacityLut: Float32Array,                                 // 256-entry TF LUT (vrTf)
     fast: boolean = false,
-    alphaScale: number = 0.06) {
+    alphaScale: number = 0.06,
+    shading?: { enabled: boolean; ambient: number; diffuse: number; specularInt: number; specularPower: number }) {
 
       if (cv1.value === null || ctx === null) return;
       const canvasx = cv1.value.width;
@@ -982,8 +1002,10 @@ const drawNiftiVR = async function(pix: Float32Array | Int16Array,
             vForward: { x: vForward.x, y: vForward.y, z: vForward.z },
             maxSteps,
             wc, ww, clut,
+            opacityLut,
             targetCanvas: cv1.value,
             alphaScale,
+            shading,
           });
           if (gpuOff) {
             isEmpty.value = false;
@@ -1012,6 +1034,7 @@ const drawNiftiVR = async function(pix: Float32Array | Int16Array,
       const range = ww;
       const ALPHA_SCALE = alphaScale;
       const nxny = nx * ny;
+      const olut = opacityLut;          // hot loop で省略
 
       // 自由回転対応: 各 canvas pixel に対し、直接 vForward 方向に ray を歩く。
       // 旧 (k, j) precompute + 2D resample は z 軸固定が前提だったので廃止。
@@ -1033,9 +1056,10 @@ const drawNiftiVR = async function(pix: Float32Array | Int16Array,
             let p = (v - lo) / range;
             if (p < 0) continue;
             if (p > 1) p = 1;
-            const alpha = p * ALPHA_SCALE;
-            if (alpha < 0.002) continue;
             const cidx = Math.min(255, Math.floor(p * 255));
+            // Opacity TF lookup × global alphaScale
+            const alpha = olut[cidx] * ALPHA_SCALE;
+            if (alpha < 0.002) continue;
             const c = clut[cidx];
             const transmit = 1 - da;
             dr += transmit * alpha * c[0];
@@ -1419,7 +1443,7 @@ defineExpose({init, show, show2, showRgb, showDirect,
                     </v-list>
                 </v-menu>
 
-                <!-- DicomBox: Make MPR を 3 軸ドロップダウンに統一 (VolumeBox の Plane/View と同じ見た目)。
+                <!-- DicomBox: Make MPR を VolumeBox と完全同一 (6 plane: axi/cor/sag/mip/smip/vr)。
                      クリックで mpr_(seriesIdx, boxId) → setPlaneOnBox(boxId, plane) を親が実行。 -->
                 <v-menu v-else-if="prop.boxKind === 'dicom'" location="bottom end">
                     <template v-slot:activator="{ props: act }">
@@ -1429,9 +1453,10 @@ defineExpose({init, show, show2, showRgb, showDirect,
                         </v-btn>
                     </template>
                     <v-list density="compact">
-                        <v-list-item @click="emit('makeMpr', 'axi')"><v-list-item-title>Axial</v-list-item-title></v-list-item>
-                        <v-list-item @click="emit('makeMpr', 'cor')"><v-list-item-title>Coronal</v-list-item-title></v-list-item>
-                        <v-list-item @click="emit('makeMpr', 'sag')"><v-list-item-title>Sagittal</v-list-item-title></v-list-item>
+                        <v-list-item v-for="p in planeItems" :key="p.id"
+                                     @click="emit('makeMpr', p.id)">
+                            <v-list-item-title>{{ p.label }}</v-list-item-title>
+                        </v-list-item>
                     </v-list>
                 </v-menu>
 
@@ -1565,6 +1590,18 @@ defineExpose({init, show, show2, showRgb, showDirect,
                     </v-list>
                 </v-menu>
 
+                <!-- VR demo 再生ボタン (VR plane のみ表示)。
+                     再生中はアイコン変化、もう一度クリックで停止。 -->
+                <v-btn v-if="prop.currentPlane === 'vr'"
+                       icon variant="text" size="x-small"
+                       :class="['mv-tb-btn', { 'is-on': prop.vrDemoRunning }]"
+                       @click="emit('toggleVrDemo')">
+                    <v-icon :icon="prop.vrDemoRunning ? 'mdi-stop-circle-outline' : 'mdi-movie-play-outline'" size="small" />
+                    <v-tooltip activator="parent" location="bottom">
+                        {{ prop.vrDemoRunning ? 'Stop demo' : 'Play VR demo (cinematic ~30s)' }}
+                    </v-tooltip>
+                </v-btn>
+
                 <!-- sMIP / VR レンダリングパラメータ popover。MIP (非 surface) と VR で
                      表示項目が違う: sMIP=threshold+depth、VR=alphaScale。
                      通常 MIP は調整するパラメータがないので非表示。-->
@@ -1580,43 +1617,105 @@ defineExpose({init, show, show2, showRgb, showDirect,
                     </template>
                     <v-card min-width="260" max-width="320">
                         <v-card-text class="pa-3">
-                            <!-- sMIP -->
+                            <!-- sMIP: slider + 数値入力併設 (細かい値を直接打てる) -->
                             <template v-if="prop.currentPlane === 'smip'">
-                                <div class="mv-tb-popover-row">
-                                    <span class="mv-tb-popover-label">Threshold</span>
-                                    <span class="mv-tb-popover-value">{{ (prop.mipThreshold ?? 0.3).toFixed(2) }}</span>
+                                <div class="mv-tb-popover-label">Threshold</div>
+                                <div class="mv-tb-slider-row">
+                                    <v-slider
+                                        :model-value="prop.mipThreshold ?? 0.3"
+                                        :min="0" :max="20" :step="0.1"
+                                        density="compact" hide-details color="primary"
+                                        class="mv-tb-slider-grow"
+                                        @update:model-value="(v: number | number[]) => emit('setMipParam', { key: 'thresholdSurfaceMip', value: Array.isArray(v) ? v[0] : v })"
+                                    />
+                                    <input
+                                        type="number"
+                                        class="mv-tb-num-input"
+                                        :value="Number((prop.mipThreshold ?? 0.3).toFixed(2))"
+                                        step="0.1" min="0"
+                                        @change="(e: Event) => emit('setMipParam', { key: 'thresholdSurfaceMip', value: Number((e.target as HTMLInputElement).value) })"
+                                    />
                                 </div>
-                                <v-slider
-                                    :model-value="prop.mipThreshold ?? 0.3"
-                                    :min="0" :max="20" :step="0.1"
-                                    density="compact" hide-details color="primary"
-                                    @update:model-value="(v: number | number[]) => emit('setMipParam', { key: 'thresholdSurfaceMip', value: Array.isArray(v) ? v[0] : v })"
-                                />
-                                <div class="mv-tb-popover-row mt-2">
-                                    <span class="mv-tb-popover-label">Depth (voxels)</span>
-                                    <span class="mv-tb-popover-value">{{ Math.round(prop.mipDepth ?? 3) }}</span>
+                                <div class="mv-tb-popover-label mt-3">Depth (voxels)</div>
+                                <div class="mv-tb-slider-row">
+                                    <v-slider
+                                        :model-value="prop.mipDepth ?? 3"
+                                        :min="1" :max="40" :step="1"
+                                        density="compact" hide-details color="primary"
+                                        class="mv-tb-slider-grow"
+                                        @update:model-value="(v: number | number[]) => emit('setMipParam', { key: 'depthSurfaceMip', value: Array.isArray(v) ? v[0] : v })"
+                                    />
+                                    <input
+                                        type="number"
+                                        class="mv-tb-num-input"
+                                        :value="Math.round(prop.mipDepth ?? 3)"
+                                        step="1" min="1"
+                                        @change="(e: Event) => emit('setMipParam', { key: 'depthSurfaceMip', value: Math.round(Number((e.target as HTMLInputElement).value)) })"
+                                    />
                                 </div>
-                                <v-slider
-                                    :model-value="prop.mipDepth ?? 3"
-                                    :min="1" :max="40" :step="1"
-                                    density="compact" hide-details color="primary"
-                                    @update:model-value="(v: number | number[]) => emit('setMipParam', { key: 'depthSurfaceMip', value: Array.isArray(v) ? v[0] : v })"
-                                />
                             </template>
-                            <!-- VR -->
+                            <!-- VR: opacity TF preset + alpha scale slider/数値 (Phase A) -->
                             <template v-else>
-                                <div class="mv-tb-popover-row">
-                                    <span class="mv-tb-popover-label">Alpha scale</span>
-                                    <span class="mv-tb-popover-value">{{ (prop.mipAlphaScale ?? 0.06).toFixed(3) }}</span>
+                                <div class="mv-tb-popover-label">Opacity preset</div>
+                                <select
+                                    class="mv-tb-tf-select mb-3"
+                                    :value="prop.vrTfPresetId ?? 'ramp'"
+                                    @change="(e: Event) => emit('setVrTfPreset', (e.target as HTMLSelectElement).value)"
+                                >
+                                    <option v-for="p in (prop.vrTfPresets ?? [])" :key="p.id" :value="p.id"
+                                            :title="p.description">
+                                        {{ p.label }}
+                                    </option>
+                                </select>
+
+                                <div class="mv-tb-popover-label">Alpha scale (overall × TF)</div>
+                                <div class="mv-tb-slider-row">
+                                    <v-slider
+                                        :model-value="prop.mipAlphaScale ?? 0.06"
+                                        :min="0.005" :max="0.5" :step="0.005"
+                                        density="compact" hide-details color="primary"
+                                        class="mv-tb-slider-grow"
+                                        @update:model-value="(v: number | number[]) => emit('setMipParam', { key: 'alphaScale', value: Array.isArray(v) ? v[0] : v })"
+                                    />
+                                    <input
+                                        type="number"
+                                        class="mv-tb-num-input"
+                                        :value="Number((prop.mipAlphaScale ?? 0.06).toFixed(3))"
+                                        step="0.005" min="0.005" max="1"
+                                        @change="(e: Event) => emit('setMipParam', { key: 'alphaScale', value: Number((e.target as HTMLInputElement).value) })"
+                                    />
                                 </div>
-                                <v-slider
-                                    :model-value="prop.mipAlphaScale ?? 0.06"
-                                    :min="0.005" :max="0.5" :step="0.005"
-                                    density="compact" hide-details color="primary"
-                                    @update:model-value="(v: number | number[]) => emit('setMipParam', { key: 'alphaScale', value: Array.isArray(v) ? v[0] : v })"
-                                />
-                                <div class="text-caption text-disabled mt-2">
-                                    Higher = more opaque. Lower = more transparent (deeper see-through).
+                                <div class="text-caption text-disabled mt-2 mb-3">
+                                    Preset shapes the value→opacity curve. Alpha scale = overall multiplier.
+                                </div>
+
+                                <!-- Phase B: Phong shading (heavy, GPU only). On = surface highlights + depth cues. -->
+                                <v-divider class="my-2" />
+                                <label class="mv-tb-shading-toggle">
+                                    <input type="checkbox"
+                                           :checked="!!prop.vrShadingEnabled"
+                                           @change="(e: Event) => emit('setVrShading', { key: 'enabled', value: (e.target as HTMLInputElement).checked })"
+                                    />
+                                    <span>Shading (Phong)</span>
+                                    <span class="text-caption text-disabled ml-1">— heavier, GPU only</span>
+                                </label>
+                                <div v-if="prop.vrShadingEnabled" class="mt-2">
+                                    <div class="mv-tb-popover-label">Ambient ({{ (prop.vrShadingAmbient ?? 0.3).toFixed(2) }})</div>
+                                    <v-slider :model-value="prop.vrShadingAmbient ?? 0.3" :min="0" :max="1" :step="0.05"
+                                              density="compact" hide-details color="primary"
+                                              @update:model-value="(v: number | number[]) => emit('setVrShading', { key: 'ambient', value: Array.isArray(v) ? v[0] : v })" />
+                                    <div class="mv-tb-popover-label mt-1">Diffuse ({{ (prop.vrShadingDiffuse ?? 0.7).toFixed(2) }})</div>
+                                    <v-slider :model-value="prop.vrShadingDiffuse ?? 0.7" :min="0" :max="1" :step="0.05"
+                                              density="compact" hide-details color="primary"
+                                              @update:model-value="(v: number | number[]) => emit('setVrShading', { key: 'diffuse', value: Array.isArray(v) ? v[0] : v })" />
+                                    <div class="mv-tb-popover-label mt-1">Specular ({{ (prop.vrShadingSpecInt ?? 0.4).toFixed(2) }})</div>
+                                    <v-slider :model-value="prop.vrShadingSpecInt ?? 0.4" :min="0" :max="1" :step="0.05"
+                                              density="compact" hide-details color="primary"
+                                              @update:model-value="(v: number | number[]) => emit('setVrShading', { key: 'specularInt', value: Array.isArray(v) ? v[0] : v })" />
+                                    <div class="mv-tb-popover-label mt-1">Spec power ({{ Math.round(prop.vrShadingSpecPower ?? 16) }})</div>
+                                    <v-slider :model-value="prop.vrShadingSpecPower ?? 16" :min="1" :max="128" :step="1"
+                                              density="compact" hide-details color="primary"
+                                              @update:model-value="(v: number | number[]) => emit('setVrShading', { key: 'specularPower', value: Array.isArray(v) ? v[0] : v })" />
                                 </div>
                             </template>
                         </v-card-text>
@@ -1890,6 +1989,51 @@ defineExpose({init, show, show2, showRgb, showDirect,
 .mv-tb-popover-value {
   font-family: 'JetBrains Mono', 'Consolas', monospace;
   color: var(--mv-text);
+}
+.mv-tb-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mv-tb-slider-grow {
+  flex: 1 1 auto;
+}
+.mv-tb-num-input {
+  flex: 0 0 64px;
+  width: 64px;
+  padding: 2px 4px;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', 'Consolas', monospace;
+  background: var(--mv-surface, #1A2129);
+  color: var(--mv-text);
+  border: 1px solid var(--mv-border);
+  border-radius: 3px;
+  text-align: right;
+}
+.mv-tb-num-input:focus {
+  outline: none;
+  border-color: var(--mv-accent);
+}
+.mv-tb-tf-select {
+  width: 100%;
+  padding: 4px 6px;
+  font-size: 12px;
+  background: var(--mv-surface);
+  color: var(--mv-text);
+  border: 1px solid var(--mv-border);
+  border-radius: 3px;
+}
+.mv-tb-tf-select:focus { outline: none; border-color: var(--mv-accent); }
+.mv-tb-shading-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--mv-text);
+  cursor: pointer;
+}
+.mv-tb-shading-toggle input[type="checkbox"] {
+  accent-color: var(--mv-accent);
 }
 
 /* Fusion blend slider in titlebar */

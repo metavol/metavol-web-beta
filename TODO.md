@@ -204,6 +204,16 @@ ONNX 化のハードルが高く、ユーザ判断で中止。`segmentation/medS
 セット候補: WebGPU MI + abort UI (1h) + 手動 nudge UI (3-5h)。合計 14-21h。
 現状ユーザ需要は低いので保留。
 
+### 遠い将来の夢: VR デモに BGM
+
+VR auto demo (vrDemo.ts、~30s シネマ) 再生中にバックグラウンド音楽を流す。
+案:
+- 短い royalty-free 軽音楽 (orchestra ambient / piano / strings) を `public/audio/` に配置
+- WebAudio API で fade-in/out
+- demo 終了で auto-stop
+- toggle UI: VR demo ボタン横に 🔊 アイコン
+工数 ~2h。視覚的なインパクトが強いだけに音もあると "あっと言わせる" 度合いが格段に上がる。
+
 ### 遠い将来の夢: 骨シンチ (planar) + CT 2D fusion
 
 ユーザ提案 (2026-05-04):

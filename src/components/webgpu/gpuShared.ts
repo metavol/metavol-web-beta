@@ -71,7 +71,7 @@ export const ensureOffscreen = (
     return { canvas, ctx };
 };
 
-// VR bind layout (4 bindings): uniform / volume f32 / clut / output
+// VR bind layout (5 bindings): uniform / volume f32 / clut / output / opacityLut
 let cachedVrLayout: any | null = null;
 let cachedVrLayoutDev: any | null = null;
 export const getVrBindGroupLayout = (device: any): any => {
@@ -82,6 +82,7 @@ export const getVrBindGroupLayout = (device: any): any => {
             { binding: 1, visibility: 0x4, texture: { sampleType: 'unfilterable-float', viewDimension: '3d' } },
             { binding: 2, visibility: 0x4, buffer: { type: 'read-only-storage' } },
             { binding: 3, visibility: 0x4, storageTexture: { access: 'write-only', format: 'rgba8unorm', viewDimension: '2d' } },
+            { binding: 4, visibility: 0x4, buffer: { type: 'read-only-storage' } },
         ],
     });
     cachedVrLayoutDev = device;
