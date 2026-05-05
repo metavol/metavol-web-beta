@@ -108,7 +108,7 @@ import { sphereStatsInPet, fillPolygonOnSlice, findMaximumAxis as maxAxis } from
 import { TRACER_PRESETS, tracerById, detectTracer, type TracerPreset } from './tracerPresets';
 import { buildOpacityLut, DEFAULT_TF, TF_PRESETS } from './vrTf';
 import { VrDemo } from './vrDemo';
-import { encodeViewState, decodeViewState, type SerializedViewState, type SerializedBoxState } from './viewStateUrl';
+import { type SerializedViewState, type SerializedBoxState } from './viewStateUrl';
 import SegmentationPanel from './SegmentationPanel.vue';
 import DebugInspector from './DebugInspector.vue';
 import { computed, onMounted, nextTick, provide } from 'vue';
@@ -407,23 +407,6 @@ onMounted(() => {
       }
       if (all.length > 0) loadFromExternalUrls(all);
     }
-    // ?state=...: layout / view パラメータを復元 (?url= や ?dev= とセットで使う想定)。
-    // ロード完了 (isLoading false) 後に apply。
-    const stateStr = p.get('state');
-    if (stateStr) {
-      const state = decodeViewState(stateStr);
-      if (state) {
-        const stop = watch(isLoading, async (v) => {
-          if (v === false) {
-            stop();
-            await nextTick();
-            applyViewState(state);
-          }
-        });
-      } else {
-        console.warn('[state] malformed view-state in URL, ignoring');
-      }
-    }
   } catch {}
   window.addEventListener('keydown', (e: KeyboardEvent) => {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'D' || e.key === 'd')){
@@ -655,12 +638,56 @@ watch(tileN, async () => {
   show();
 });
 
+// DICOM slice の現スライス pixel を canvas (cx, cy) から直接読む。
+// Volume が無い / 生成前の DICOM-only シリーズでも inspector に値を出すために使う。
+// Photometric が "RGB" 以外 (Int16 grayscale) の場合のみ対応。
+//   返り値: { value, col, row }   value は intercept/slope 適用後 (DICOM 表示単位)
+const readDicomSlicePixelAt = (boxId: number, cx: number, cy: number): { value: number | null; col: number; row: number } | null => {
+  if (!isDicomSliceImageBoxInfo(boxId)) return null;
+  const info = imageBoxInfos.value[boxId] as DicomSliceImageBoxInfo;
+  const series = seriesList[info.currentSeriesNumber];
+  const ds = series?.myDicom?.[info.currentSliceNumber];
+  if (!ds) return null;
+  const cols = ds.int16('x00280011') ?? 0;
+  const rows = ds.int16('x00280010') ?? 0;
+  if (!cols || !rows) return null;
+  const canvasW = imageBoxW.value!;
+  const canvasH = imageBoxH.value!;
+  const zoom = info.zoom ?? 1;
+  // ImageBox.drawImageCvZoom と同じ canvas → 画像 pixel 変換
+  const fx = (cx - canvasW / 2) / zoom + cols / 2 + info.centerX;
+  const fy = (cy - canvasH / 2) / zoom + rows / 2 + info.centerY;
+  const col = Math.floor(fx + 0.5), row = Math.floor(fy + 0.5);
+  if (col < 0 || col >= cols || row < 0 || row >= rows) {
+    return { value: null, col, row };
+  }
+  if ((ds.string('x00280004') ?? '').toUpperCase() === 'RGB') {
+    return { value: null, col, row };  // RGB は scalar 値ではないので未対応
+  }
+  const pde = ds.elements?.x7fe00010;
+  if (!pde) return { value: null, col, row };
+  // pixel data 取得 (decompressed があればそれを使う)
+  const buf = (ds as any).decompressed == null ? ds.byteArray.buffer as ArrayBuffer : (ds as any).decompressed;
+  const offset = (ds as any).decompressed == null ? pde.dataOffset : 0;
+  const length = (ds as any).decompressed == null ? pde.length : buf.byteLength;
+  let raw: number;
+  try {
+    const i16a = new Int16Array(buf, offset, length / 2);
+    raw = i16a[row * cols + col];
+  } catch {
+    return { value: null, col, row };
+  }
+  const intercept = Number(ds.string('x00281052') ?? '0');
+  const slope = Number(ds.string('x00281053') ?? '1');
+  return { value: raw * slope + intercept, col, row };
+};
+
+// World 座標を inspector に表示するための payload (mm 単位)。
+const debugWorld = ref<{ x: number; y: number; z: number } | null>(null);
+
 const updateDebugHover = (boxId: number, e: MouseEvent) => {
   if (!debugMode.value) return;
   // DICOM slice / Volume / Fusion のいずれにも対応する。
-  // DICOM slice: 該当 series が myDicom のみ + volume 未生成のことがある → ensureVolume_ 経由で
-  //   一時的に volume を作ると重いので、ここでは volume があるシリーズのみ inspect する。
-  //   DICOM box でも (mpr_ 経由などで) volume が既に生成されていれば値が出る。
   if (!isAnyVolumeBox(boxId) && !isDicomSliceImageBoxInfo(boxId)) {
     debugShow.value = false;
     return;
@@ -668,7 +695,35 @@ const updateDebugHover = (boxId: number, e: MouseEvent) => {
   const [cx, cy] = getCanvasXY(e);
   const w = screenToWorldAny(boxId, cx, cy);
   if (!w) { debugShow.value = false; return; }
+  debugWorld.value = { x: w.x, y: w.y, z: w.z };
   const rows: typeof debugHoverRows.value = [];
+
+  // DICOM slice box: その box が表示している現スライスの直接 pixel 値を 1 行追加
+  // (volume 未生成の DICOM-only シリーズでも値が見えるように)
+  if (isDicomSliceImageBoxInfo(boxId)) {
+    const info = imageBoxInfos.value[boxId] as DicomSliceImageBoxInfo;
+    const sIdx = info.currentSeriesNumber;
+    const series = seriesList[sIdx];
+    const ds = series?.myDicom?.[info.currentSliceNumber];
+    // 同じ series の volume 行と重複させないため、その series が **volume を持たない** ときだけ
+    // DICOM 直読み行を出す。volume がある場合は volume 行が後段で出る。
+    if (ds && !series.volume) {
+      const px = readDicomSlicePixelAt(boxId, cx, cy);
+      const mod = (ds.string('x00080060') ?? '').toUpperCase();
+      const desc = ds.string('x0008103e') ?? `S${sIdx}`;
+      rows.push({
+        seriesIndex: sIdx,
+        modality: mod,
+        description: `${desc} (slice ${info.currentSliceNumber + 1})`,
+        i: px?.col ?? 0,
+        j: px?.row ?? 0,
+        k: info.currentSliceNumber,
+        value: px?.value ?? null,
+        inBounds: !!px && px.value !== null,
+      });
+    }
+  }
+
   for (let s = 0; s < seriesList.length; s++){
     const v = seriesList[s].volume;
     if (!v) continue;
@@ -1566,12 +1621,149 @@ const serializeCurrentViewState = (): SerializedViewState => {
   return { v: 1, t: tileN.value ?? 0, sync: !!syncImageBox.value, bs };
 };
 
-const buildShareUrl = (): string => {
-  const state = serializeCurrentViewState();
-  const code = encodeViewState(state);
-  const u = new URL(window.location.href);
-  u.searchParams.set('state', code);
-  return u.toString();
+// ===== Snapshot file (B-replacement-of-share-URL) =====
+// 「View status を JSON にして download / 別セッションで読み込み」用。
+// View 状態 + (有効なら) PET segmentation 状態を 1 ファイルにまとめる。
+// 注意: voxel データは含めない。ロード時、対応する画像が同じ seriesUID で再ロードされている前提。
+//
+// File format (JSON):
+//   { schema: 'metavol-snapshot', v: 1, ts: <epoch>, view: SerializedViewState,
+//     segmentation?: { seriesUID, dims, threshold, thresholdUnit, labels, ... ,
+//                      finalMask_b64?, thresholdMask_b64?, manualEdits_b64? } }
+
+interface MetavolSnapshotFile {
+  schema: 'metavol-snapshot';
+  v: 1;
+  ts: number;
+  view: SerializedViewState;
+  segmentation: {
+    seriesUID: string;
+    seriesDescription?: string;
+    dims: [number, number, number];
+    threshold: number;
+    thresholdUnit: 'SUV' | 'CNTS';
+    labels: Array<{ id: number; name: string; color: [number, number, number] }>;
+    currentLabelId: number;
+    sphere: { centerWorld: [number, number, number]; radiusMm: number } | null;
+    finalMask_b64?: string;
+    thresholdMask_b64?: string;
+    manualEdits_b64?: string;
+  } | null;
+}
+
+const ab2b64 = (buf: ArrayBuffer | undefined): string | undefined => {
+  if (!buf) return undefined;
+  const u8 = new Uint8Array(buf);
+  // chunked btoa to avoid stack overflow on large buffers
+  let s = '';
+  const CH = 0x8000;
+  for (let i = 0; i < u8.length; i += CH) {
+    s += String.fromCharCode.apply(null, Array.from(u8.subarray(i, i + CH)) as number[]);
+  }
+  return btoa(s);
+};
+const b642ab = (s: string | undefined): ArrayBuffer | undefined => {
+  if (!s) return undefined;
+  const bin = atob(s);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8.buffer;
+};
+
+const buildSnapshotJson = (): string => {
+  const view = serializeCurrentViewState();
+  const segPayload = segStore.serializeForPersistence();
+  let segmentation: MetavolSnapshotFile['segmentation'] = null;
+  if (segPayload) {
+    segmentation = {
+      seriesUID: segPayload.seriesUID,
+      seriesDescription: segPayload.seriesDescription,
+      dims: segPayload.dims,
+      threshold: segPayload.threshold,
+      thresholdUnit: segPayload.thresholdUnit,
+      labels: segPayload.labels.map(l => ({ id: l.id, name: l.name, color: [l.color[0], l.color[1], l.color[2]] as [number, number, number] })),
+      currentLabelId: segPayload.currentLabelId,
+      sphere: segPayload.sphere,
+      finalMask_b64: ab2b64(segPayload.finalMask),
+      thresholdMask_b64: ab2b64(segPayload.thresholdMask),
+      manualEdits_b64: ab2b64(segPayload.manualEdits),
+    };
+  }
+  const file: MetavolSnapshotFile = {
+    schema: 'metavol-snapshot',
+    v: 1,
+    ts: Date.now(),
+    view,
+    segmentation,
+  };
+  return JSON.stringify(file);
+};
+
+// 結果: { ok, info: '...applied summary...' } / { ok: false, reason }
+const applySnapshotJson = (jsonText: string): { ok: true; info: string } | { ok: false; reason: string } => {
+  let parsed: any;
+  try { parsed = JSON.parse(jsonText); } catch (e) {
+    return { ok: false, reason: 'Invalid JSON: ' + ((e as Error)?.message ?? e) };
+  }
+  if (!parsed || parsed.schema !== 'metavol-snapshot') {
+    return { ok: false, reason: 'Not a metavol-snapshot file.' };
+  }
+  if (parsed.v !== 1) {
+    return { ok: false, reason: `Unsupported snapshot version: ${parsed.v}` };
+  }
+  const view = parsed.view as SerializedViewState | undefined;
+  if (!view || !Array.isArray(view.bs)) {
+    return { ok: false, reason: 'Snapshot has no view state.' };
+  }
+  // 注意: voxel data は含まれていないので、対応する image が seriesList に
+  // 既にロードされている前提。currentSeriesNumber が範囲外のときは applyViewState
+  // 内で defensive にスキップされる (info.currentSeriesNumber を直接代入するだけ)。
+  applyViewState(view);
+
+  let segMsg = '';
+  if (parsed.segmentation) {
+    const s = parsed.segmentation;
+    const r = segStore.restoreFromPersistence({
+      thresholdMask: b642ab(s.thresholdMask_b64),
+      manualEdits: b642ab(s.manualEdits_b64),
+      finalMask: b642ab(s.finalMask_b64),
+      dims: s.dims,
+      threshold: s.threshold,
+      thresholdUnit: s.thresholdUnit,
+      labels: s.labels,
+      currentLabelId: s.currentLabelId,
+      sphere: s.sphere,
+      savedAt: parsed.ts,
+    });
+    if (r.ok) segMsg = ' + segmentation';
+    else segMsg = ` (segmentation skipped: ${r.reason})`;
+  }
+  show();
+  return { ok: true, info: `${view.t} box(es) restored${segMsg}` };
+};
+
+// File として download / 受け取り。
+const downloadSnapshotFile = () => {
+  const json = buildSnapshotJson();
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+  a.href = url;
+  a.download = `metavol-snapshot_${ts}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+const loadSnapshotFile = async (file: File): Promise<{ ok: true; info: string } | { ok: false; reason: string }> => {
+  try {
+    const text = await file.text();
+    return applySnapshotJson(text);
+  } catch (e) {
+    return { ok: false, reason: 'Read failed: ' + ((e as Error)?.message ?? e) };
+  }
 };
 
 const applyViewState = (state: SerializedViewState) => {
@@ -1663,6 +1855,63 @@ const onTitlebarMakeMpr = (i: number, plane: 'axi' | 'cor' | 'sag' | 'mip' | 'sm
   mpr_(seriesIdx, i);
   // 指定 plane に切替 (default = axi)。axi のままなら setPlaneOnBox の noop。
   if (plane !== 'axi') setPlaneOnBox(i, plane);
+  showImage(i);
+};
+
+// Volume / Fusion box が DICOM-origin 系列 (myDicom > 0) を持つかどうか。
+// Fusion は currentSeriesNumber (base) で判定。NIfTI のみは false。
+const getCanRevertToDicom = (i: number): boolean => {
+  if (i < 0 || i >= imageBoxInfos.value.length) return false;
+  if (!isAnyVolumeBox(i)) return false;
+  const info = imageBoxInfos.value[i] as VolumeImageBoxInfo;
+  const sIdx = info.currentSeriesNumber;
+  if (sIdx == null || sIdx < 0 || sIdx >= seriesList.length) return false;
+  const dlist = seriesList[sIdx].myDicom;
+  return !!dlist && dlist.length > 0;
+};
+
+// Volume box → DICOM slice (2D) box に戻す。
+// 元 Volume の WC/WW を継承するが、PT は SUV → raw count スケールに戻す
+// (volume voxel は SUV 倍されているため、DICOM raw 表示窓は myWC / suvFactor)。
+// CLUT は捨て (DICOM slice は常に gray)。中心 slice は元 Volume の centerInWorld を
+// world→voxel 逆射影して z 軸 index に置く。
+const onBackToDicom = (i: number) => {
+  if (i < 0 || i >= imageBoxInfos.value.length) return;
+  if (!isAnyVolumeBox(i)) return;
+  const old = imageBoxInfos.value[i] as VolumeImageBoxInfo;
+  const sIdx = old.currentSeriesNumber;
+  const series = seriesList[sIdx];
+  if (!series?.myDicom || series.myDicom.length === 0) {
+    alert('This series has no original DICOM frames — cannot revert to 2D view.');
+    return;
+  }
+  const vol = series.volume;
+  // 旧 centerInWorld から最寄り slice index を求める。volume が無いケースは index 0。
+  let sliceIdx = 0;
+  if (vol && old.centerInWorld) {
+    const v = worldToVoxel(old.centerInWorld, vol);
+    sliceIdx = Math.max(0, Math.min(series.myDicom.length - 1, Math.floor(v.z + 0.5)));
+  }
+  // PT で SUV 化されているなら DICOM 表示窓は myWC / suvFactor で raw counts に戻す
+  let wc: number | null = old.myWC ?? null;
+  let ww: number | null = old.myWW ?? null;
+  const mod = (vol?.metadata?.modality ?? '').toUpperCase();
+  if ((mod === 'PT' || mod === 'PET') && vol?.metadata?.suvOk && vol?.metadata?.suvFactor) {
+    if (wc != null) wc = wc / vol.metadata.suvFactor;
+    if (ww != null) ww = ww / vol.metadata.suvFactor;
+  }
+  imageBoxInfos.value[i] = {
+    currentSeriesNumber: sIdx,
+    currentSliceNumber: sliceIdx,
+    imageNumberOfDicomTag: null,
+    description: old.description ?? '',
+    myWC: wc,
+    myWW: ww,
+    centerX: 0,
+    centerY: 0,
+    zoom: null,
+    interpolation: old.interpolation,
+  } as DicomSliceImageBoxInfo;
   showImage(i);
 };
 
@@ -4354,6 +4603,21 @@ const phantomNema = () => {
   show();
 }
 
+const phantomWholeBody = () => {
+  const P = Phantom.generatePhantomWholeBody();
+  const c = pushVolume(seriesList, P);
+  // Whole-body PET: bladder is hottest (~18). Default window 0..15 catches mets +
+  // most organs but leaves bladder saturated (which is realistic).
+  c.myWC = 7.5;
+  c.myWW = 15;
+  c.clut = 1;
+  c.description = 'Whole-body PET (synthetic)';
+  imageBoxInfos.value[selectedImageBoxId.value] = c;
+  refreshSegStoreVolumeRefs();
+  rebuildSeriesSummaries();
+  show();
+}
+
 const runDebugger = () => {
   console.log(innerWidth);
 };
@@ -4926,8 +5190,9 @@ defineExpose({
   niftiGunzipInProgress,
   niftiGunzipName,
   niftiGunzipBytes,
-  // View state share URL ビルダー (?state=...)
-  buildShareUrl,
+  // Snapshot file (replaces former share-URL): full session save/load
+  downloadSnapshotFile,
+  loadSnapshotFile,
   // NIfTI header viewer 用
   getNiftiHeaderForSeries: (idx: number) => {
     if (idx < 0 || idx >= seriesList.length) return null;
@@ -4974,6 +5239,7 @@ defineExpose({
       @inspectRaw="(p: { index: number }) => inspectNiftiRaw(p.index)"
       @viewHeader="(p: { index: number }) => onViewNiftiHeader(p.index)"
       @phantomNema="phantomNema"
+      @phantomWholeBody="phantomWholeBody"
       @redraw="show"
     />
   </v-navigation-drawer>
@@ -5029,7 +5295,11 @@ defineExpose({
         To add more later, use the <v-icon icon="mdi-menu" size="small" /> menu in the top-left.
       </span>
       <span class="mv-imagearea-empty-hint mv-empty-link-hint">
-        Or share a link with <code>?url=https://your-host/scan.nii.gz</code>
+        Restoring a previous session? Drop your image files first, then use the
+        <v-icon icon="mdi-camera-outline" size="small" /> Snapshot menu (top bar) → Load snapshot.
+      </span>
+      <span class="mv-imagearea-empty-hint mv-empty-link-hint">
+        Remote: pass DICOM/NIfTI as <code>?url=https://your-host/scan.nii.gz</code>
         (multiple <code>?url=</code> params allowed; CORS-permitted hosts only)
       </span>
     </div>
@@ -5108,6 +5378,8 @@ defineExpose({
         @set-vr-tf-points="(pts: { v: number; a: number }[]) => onSetVrTfPoints(i-1, pts)"
         @set-vr-shading="(p: { key: 'enabled'|'ambient'|'diffuse'|'specularInt'|'specularPower'; value: number | boolean }) => onSetVrShading(i-1, p)"
         @toggle-vr-demo="onToggleVrDemo(i-1)"
+        :can-revert-to-dicom="getCanRevertToDicom(i-1)"
+        @back-to-dicom="onBackToDicom(i-1)"
       />
     </div>
 
@@ -5115,6 +5387,7 @@ defineExpose({
     <DebugInspector
       :enabled="debugMode"
       :rows="debugHoverRows"
+      :world="debugWorld"
       :screen-x="debugScreenX"
       :screen-y="debugScreenY"
       :show="debugShow"
@@ -5227,7 +5500,10 @@ defineExpose({
   gap: 0;
 }
 
-/* 起動直後 / Close all 後: box ゼロのときの empty state */
+/* 起動直後 / Close all 後: box ゼロのときの empty state。
+   drag&drop イベントは @drop.prevent が親 .mv-imagearea にあるため、empty state 自身が
+   pointer-events を catch しても normal な bubbling で親まで届く → Load button を
+   普通に click できる。 */
 .mv-imagearea-empty {
   display: flex;
   flex-direction: column;
@@ -5238,7 +5514,6 @@ defineExpose({
   height: 100%;
   color: var(--mv-text-muted, #5A6877);
   user-select: none;
-  pointer-events: none;
 }
 .mv-imagearea-empty-title {
   font-size: 14px;

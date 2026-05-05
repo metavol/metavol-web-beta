@@ -152,6 +152,47 @@
         meta<span class="mv-brand-accent">vol</span>-web
       </div>
 
+      <!-- Snapshot save/load: viewer status を JSON にして download / 別セッションで読み込み -->
+      <v-menu location="bottom">
+        <template v-slot:activator="{ props: act }">
+          <v-btn
+            v-bind="act"
+            :class="['mv-tool-btn', 'ml-2', { 'is-active': !!snapshotMsg }]"
+            variant="text"
+            size="small"
+          >
+            <v-icon :icon="snapshotMsg ? 'mdi-check' : 'mdi-camera-outline'" />
+            <v-tooltip activator="parent" location="bottom">
+              <template v-if="snapshotMsg">{{ snapshotMsg }}</template>
+              <template v-else>Snapshot — save / load viewer status</template>
+            </v-tooltip>
+          </v-btn>
+        </template>
+        <v-list density="compact">
+          <v-list-item @click="onSaveSnapshot">
+            <template v-slot:prepend>
+              <v-icon icon="mdi-tray-arrow-down" size="small" />
+            </template>
+            <v-list-item-title>Save snapshot…</v-list-item-title>
+            <v-list-item-subtitle>Download .json with layout + segmentation</v-list-item-subtitle>
+          </v-list-item>
+          <v-list-item @click="onLoadSnapshot">
+            <template v-slot:prepend>
+              <v-icon icon="mdi-tray-arrow-up" size="small" />
+            </template>
+            <v-list-item-title>Load snapshot…</v-list-item-title>
+            <v-list-item-subtitle>Pick a previously saved .json (load images first)</v-list-item-subtitle>
+          </v-list-item>
+        </v-list>
+      </v-menu>
+      <input
+        ref="snapshotLoadInput"
+        type="file"
+        accept=".json,application/json"
+        style="display: none"
+        @change="onSnapshotInputChange"
+      />
+
       <v-divider vertical class="mx-3" />
 
       <!-- Tool icons -->
@@ -523,35 +564,47 @@
       </v-menu>
 
       <v-btn
-        :class="['mv-tool-btn', { 'is-active': !!shareCopiedMsg }]"
-        variant="text"
-        size="small"
-        @click="onCopyShareUrl"
-      >
-        <v-icon :icon="shareCopiedMsg ? 'mdi-check' : 'mdi-share-variant-outline'" />
-        <v-tooltip activator="parent" location="bottom">
-          <template v-if="shareCopiedMsg">{{ shareCopiedMsg }}</template>
-          <template v-else>
-            <div>Copy a shareable link to your clipboard</div>
-            <div style="opacity: 0.7; font-size: 11px;">
-              The link reproduces the current layout, window/level, and (if any) the source URL.
-              Open it on another machine — DICOM/NIfTI must be reachable via <code>?url=</code>.
-            </div>
-          </template>
-        </v-tooltip>
-      </v-btn>
-
-      <v-btn
         class="mv-tool-btn"
         variant="text"
         size="small"
         color="error"
-        @click="closingImages = true"
+        @click="onCloseAll"
       >
         <v-icon icon="mdi-trash-can-outline" />
         <v-tooltip activator="parent" location="bottom">Close all</v-tooltip>
       </v-btn>
     </v-app-bar>
+
+    <!-- Close-all 確認ダイアログ。データ損失リスクを明示する。 -->
+    <v-dialog v-model="closeAllDialogOpen" max-width="460">
+      <v-card>
+        <v-card-title class="text-body-1">Close all images?</v-card-title>
+        <v-card-text>
+          <p>This clears the current session, including:</p>
+          <ul class="mv-close-list">
+            <li>{{ closeAllSummary.boxes }} open box(es)</li>
+            <li>{{ closeAllSummary.series }} loaded series</li>
+            <li v-if="closeAllSummary.hasMask">
+              <strong>Segmentation work</strong> (mask, labels, lesion table)
+            </li>
+            <li v-if="closeAllSummary.hasSphere">
+              Sphere ROI
+            </li>
+          </ul>
+          <p v-if="closeAllSummary.hasMask || closeAllSummary.hasSphere" class="text-warning text-caption mt-2">
+            Save your work first if you need it (Snapshot, Save NIfTI mask, etc.).
+          </p>
+          <p v-else class="text-caption text-disabled mt-2">
+            No segmentation work detected — safe to close.
+          </p>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="closeAllDialogOpen = false">Cancel</v-btn>
+          <v-btn color="error" variant="flat" @click="confirmCloseAll">Close all</v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
 
     <v-main>
       <DicomView
@@ -710,6 +763,31 @@ const fitToWindow = () => {
   dicomViewRef.value?.fitToWindow?.();
 };
 
+// Close all 確認ダイアログ
+const closeAllDialogOpen = ref(false);
+const closeAllSummary = computed(() => {
+  const list = (dicomViewRef.value?.seriesSummariesPublic ?? []) as Array<unknown>;
+  const boxes = tileN.value ?? 0;
+  const series = list.length;
+  const hasMask = !!(segStore.finalMask && segStore.labels && segStore.labels.length > 0);
+  const hasSphere = !!segStore.sphere;
+  return { boxes, series, hasMask, hasSphere };
+});
+const onCloseAll = () => {
+  // データが何も無ければ即時閉じる (boxes=0 かつ series=0)。
+  // それ以外は確認ダイアログを出す。
+  const s = closeAllSummary.value;
+  if (s.boxes === 0 && s.series === 0) {
+    closingImages.value = true;
+    return;
+  }
+  closeAllDialogOpen.value = true;
+};
+const confirmCloseAll = () => {
+  closeAllDialogOpen.value = false;
+  closingImages.value = true;
+};
+
 // "Load files…" (ハンバーガーメニュー) から OS のファイルピッカーを開く。
 // 選択されたファイルは DicomView.loadFiles に流す → 既存 series に append される。
 const appBarLoadInput = ref<HTMLInputElement | null>(null);
@@ -862,24 +940,34 @@ const jpegProgress = computed(() => {
   return { inProgress, done, total, percent };
 });
 
-// "Copy share URL" — 現在 layout を URL ?state= に encode してクリップボード。
-// ローカル D&D ファイルは URL に乗らないので、`?url=` でサーバから fetch 可能なときだけ
-// リモートで再現できる旨を Tooltip で説明する。
-const shareCopiedMsg = ref<string>('');
-const onCopyShareUrl = async () => {
-  const url = dicomViewRef.value?.buildShareUrl?.();
-  if (!url) {
-    shareCopiedMsg.value = 'Nothing to share — load images first';
-    setTimeout(() => shareCopiedMsg.value = '', 3000);
-    return;
-  }
+// Snapshot save / load (replaces former Copy share URL).
+//   Save: layout + segmentation + lesion table を 1 JSON にして download。
+//   Load: 別セッションで JSON を読み込み → 同じ images を再ロード済みの状態に対して復元。
+const snapshotMsg = ref<string>('');
+const setSnapshotMsg = (m: string) => {
+  snapshotMsg.value = m;
+  setTimeout(() => { if (snapshotMsg.value === m) snapshotMsg.value = ''; }, 3000);
+};
+const onSaveSnapshot = () => {
   try {
-    await navigator.clipboard.writeText(url);
-    shareCopiedMsg.value = `Copied to clipboard (${url.length} chars)`;
-  } catch {
-    try { window.prompt('Copy this URL:', url); shareCopiedMsg.value = 'Shown — copy manually'; } catch {}
+    dicomViewRef.value?.downloadSnapshotFile?.();
+    setSnapshotMsg('Snapshot downloaded');
+  } catch (err: any) {
+    setSnapshotMsg('Save failed: ' + (err?.message ?? err));
   }
-  setTimeout(() => shareCopiedMsg.value = '', 3000);
+};
+const snapshotLoadInput = ref<HTMLInputElement | null>(null);
+const onLoadSnapshot = () => {
+  snapshotLoadInput.value?.click();
+};
+const onSnapshotInputChange = async (e: Event) => {
+  const inp = e.target as HTMLInputElement;
+  const file = inp.files?.[0];
+  inp.value = '';
+  if (!file) return;
+  const r = await dicomViewRef.value?.loadSnapshotFile?.(file);
+  if (r?.ok) setSnapshotMsg(`Loaded: ${r.info}`);
+  else setSnapshotMsg(`Load failed: ${r?.reason ?? 'unknown error'}`);
 };
 
 // nii.gz gunzip 進捗 (累計 MB)。最終サイズは gzip 形式上事前取得困難のため進捗 % は出さず

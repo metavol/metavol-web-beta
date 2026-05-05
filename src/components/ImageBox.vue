@@ -88,6 +88,8 @@ const prop = defineProps<{
   vrShadingSpecPower?: number;
   // VR demo: 再生中?
   vrDemoRunning?: boolean;
+  // この Volume box は元 DICOM に戻せるか? (DICOM-origin 系列のみ true)。
+  canRevertToDicom?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -123,6 +125,8 @@ const emit = defineEmits<{
   (e: 'setVrShading', payload: { key: 'enabled' | 'ambient' | 'diffuse' | 'specularInt' | 'specularPower'; value: number | boolean }): void;
   // VR demo: play / stop の toggle
   (e: 'toggleVrDemo'): void;
+  // Volume box → DICOM slice (2D) に戻す
+  (e: 'backToDicom'): void;
 }>();
 
 // Fusion box の overlay clut が active か判定 (clut1 用)
@@ -1444,7 +1448,7 @@ defineExpose({init, show, show2, showRgb, showDirect,
             </span>
 
             <span class="mv-titlebar-actions" @dblclick.stop>
-                <!-- Volume / Fusion / MIP: 6 plane (axi/cor/sag/mip/smip/vr) 切替 -->
+                <!-- Volume / Fusion / MIP: 6 plane (axi/cor/sag/mip/smip/vr) + DICOM 2D 戻り -->
                 <v-menu v-if="isVolumeKind()" location="bottom end">
                     <template v-slot:activator="{ props: act }">
                         <v-btn v-bind="act" icon variant="text" size="x-small" class="mv-tb-btn">
@@ -1458,6 +1462,18 @@ defineExpose({init, show, show2, showRgb, showDirect,
                                      @click="emit('setPlane', p.id)">
                             <v-list-item-title>{{ p.label }}</v-list-item-title>
                         </v-list-item>
+                        <!-- DICOM-origin 系列のみ「2D に戻す」を許可。NIfTI のみは元 DICOM が無いので不可。
+                             prop.canRevertToDicom が true のときだけ表示 -->
+                        <template v-if="prop.canRevertToDicom">
+                            <v-divider class="my-1" />
+                            <v-list-item @click="emit('backToDicom')">
+                                <template v-slot:prepend>
+                                    <v-icon icon="mdi-image-outline" size="small" />
+                                </template>
+                                <v-list-item-title>DICOM slice (2D)</v-list-item-title>
+                                <v-list-item-subtitle>Back to single-slice view</v-list-item-subtitle>
+                            </v-list-item>
+                        </template>
                     </v-list>
                 </v-menu>
 

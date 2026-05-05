@@ -9,6 +9,7 @@ defineProps<{
         value: number | null;
         inBounds: boolean;
     }>;
+    world: { x: number; y: number; z: number } | null;
     screenX: number;
     screenY: number;
     show: boolean;
@@ -25,6 +26,10 @@ defineProps<{
             <v-icon icon="mdi-bug-outline" size="x-small" />
             <span class="ml-1">voxel inspector</span>
             <span class="hdr-hint ml-2">Shift+Click to edit</span>
+        </div>
+        <div v-if="world" class="world-row mono">
+            <span class="world-label">world (mm)</span>
+            <span class="world-val">{{ formatMm(world.x) }}, {{ formatMm(world.y) }}, {{ formatMm(world.z) }}</span>
         </div>
         <table>
             <thead>
@@ -72,6 +77,7 @@ const formatVal = (v: number): string => {
     if (Number.isInteger(v)) return String(v);
     return v.toFixed(3);
 };
+const formatMm = (v: number): string => v.toFixed(1);
 </script>
 
 <style scoped>
@@ -105,6 +111,24 @@ const formatVal = (v: number): string => {
     font-weight: 400;
     text-transform: none;
     letter-spacing: 0;
+}
+
+.world-row {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    padding: 2px 0 4px 0;
+    border-bottom: 1px solid var(--mv-border);
+    margin-bottom: 4px;
+    font-size: 10px;
+}
+.world-label {
+    color: var(--mv-text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.world-val {
+    color: var(--mv-text);
 }
 
 table {

@@ -36,6 +36,7 @@ const emit = defineEmits([
   "presetSelected",
   "changeSlice",
   "phantomNema",
+  "phantomWholeBody",
   "redraw",
   "setModality",
   "setActiveForSeg",
@@ -258,14 +259,18 @@ const onPetUnitChange = (v: 'SUV' | 'BqMl' | null | undefined) => {
       </div>
 
       <div v-if="showAdvanced" class="mt-2">
-        <div class="mv-section-title">Demo phantom</div>
+        <div class="mv-section-title">Demo phantoms</div>
         <div class="mv-btn-row">
           <v-btn size="x-small" variant="tonal" @click="emit('phantomNema')">
-            NEMA IEC body
+            NEMA IEC
+          </v-btn>
+          <v-btn size="x-small" variant="tonal" @click="emit('phantomWholeBody')">
+            Whole-body PET
           </v-btn>
         </div>
         <div class="text-caption text-disabled mt-1">
-          Standard PET QC phantom: 6 hot spheres in a warm body, cold lung insert.
+          NEMA IEC: 6 hot spheres in a warm body, cold lung insert.<br />
+          Whole-body: synthetic FDG-PET with brain, heart, liver, kidneys, bladder, and 8 metastases.
         </div>
 
         <!-- PET Standard 候補スコアリングルール (ATTN > NAC、WB > Lung 等) -->
