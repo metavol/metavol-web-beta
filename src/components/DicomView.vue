@@ -1453,6 +1453,20 @@ const onSetVrTfPreset = (i: number, presetId: string) => {
   showImage(i);
 };
 
+// D15: visual editor から制御点を直接更新。preset id は 'custom' 化 (UI で badge 表示)。
+const getBoxVrTfPoints = (i: number): { v: number; a: number }[] | undefined => {
+  if (!isAnyVolumeBox(i)) return undefined;
+  return (imageBoxInfos.value[i] as VolumeImageBoxInfo).mip?.vrOpacityTF;
+};
+const onSetVrTfPoints = (i: number, pts: { v: number; a: number }[]) => {
+  if (!isAnyVolumeBox(i)) return;
+  const info = imageBoxInfos.value[i] as VolumeImageBoxInfo;
+  if (!info.mip) return;
+  info.mip.vrOpacityTF = pts.map(p => ({ ...p }));
+  info.mip.vrOpacityPresetId = 'custom';
+  showImage(i);
+};
+
 // Phase B: shading 状態の getter / setter
 const ensureVrShading = (i: number) => {
   if (!isAnyVolumeBox(i)) return null;
@@ -4916,6 +4930,7 @@ defineExpose({
         :mip-alpha-scale="getBoxMipAlphaScale(i-1)"
         :vr-tf-preset-id="getBoxVrTfPresetId(i-1)"
         :vr-tf-presets="vrTfPresetsView"
+        :vr-tf-points="getBoxVrTfPoints(i-1)"
         :vr-shading-enabled="!!getVrShadingField(i-1, 'enabled')"
         :vr-shading-ambient="getVrShadingField(i-1, 'ambient')"
         :vr-shading-diffuse="getVrShadingField(i-1, 'diffuse')"
@@ -4944,6 +4959,7 @@ defineExpose({
         @set-interpolation="(p: { layer: 'base'|'overlay'; mode: 'nearest'|'bilinear' }) => onSetInterpolation(i-1, p)"
         @set-mip-param="(p: { key: 'thresholdSurfaceMip' | 'depthSurfaceMip' | 'alphaScale'; value: number }) => onSetMipParam(i-1, p)"
         @set-vr-tf-preset="(id: string) => onSetVrTfPreset(i-1, id)"
+        @set-vr-tf-points="(pts: { v: number; a: number }[]) => onSetVrTfPoints(i-1, pts)"
         @set-vr-shading="(p: { key: 'enabled'|'ambient'|'diffuse'|'specularInt'|'specularPower'; value: number | boolean }) => onSetVrShading(i-1, p)"
         @toggle-vr-demo="onToggleVrDemo(i-1)"
       />

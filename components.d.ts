@@ -16,5 +16,6 @@ declare module 'vue' {
     SegmentationPanel: typeof import('./src/components/SegmentationPanel.vue')['default']
     SeriesList: typeof import('./src/components/SeriesList.vue')['default']
     Sidebar: typeof import('./src/components/Sidebar.vue')['default']
+    VrTfEditor: typeof import('./src/components/VrTfEditor.vue')['default']
   }
 }

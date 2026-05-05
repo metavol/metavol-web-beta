@@ -13,6 +13,7 @@ import { gpuRenderMip } from './webgpu/mipPipeline';
 import { gpuRenderVr } from './webgpu/vrPipeline';
 import { gpuRenderSlice } from './webgpu/slicePipeline';
 import { gpuRenderFusion } from './webgpu/fusionPipeline';
+import VrTfEditor from './VrTfEditor.vue';
 import { gpuRenderFusionMip } from './webgpu/fusionMipPipeline';
 import { gpuRenderFusionVr } from './webgpu/fusionVrPipeline';
 import { usePerfStore } from '../stores/perf';
@@ -77,6 +78,8 @@ const prop = defineProps<{
   vrTfPresetId?: string;
   // 全 preset 選択肢 (UI 表示用、parent から渡す)
   vrTfPresets?: { id: string; label: string; description: string }[];
+  // VR D15: 実 control points (vrOpacityTF)。editor がこれを直接編集する。
+  vrTfPoints?: { v: number; a: number }[];
   // VR Phase B: Phong shading
   vrShadingEnabled?: boolean;
   vrShadingAmbient?: number;
@@ -114,6 +117,8 @@ const emit = defineEmits<{
   (e: 'setMipParam', payload: { key: 'thresholdSurfaceMip' | 'depthSurfaceMip' | 'alphaScale'; value: number }): void;
   // VR Phase A: TF preset 切替
   (e: 'setVrTfPreset', presetId: string): void;
+  // VR D15: 直接 control points を更新 (editor 経由)。preset id は親側で 'custom' に。
+  (e: 'setVrTfPoints', pts: { v: number; a: number }[]): void;
   // VR Phase B: shading 設定
   (e: 'setVrShading', payload: { key: 'enabled' | 'ambient' | 'diffuse' | 'specularInt' | 'specularPower'; value: number | boolean }): void;
   // VR demo: play / stop の toggle
@@ -1656,9 +1661,12 @@ defineExpose({init, show, show2, showRgb, showDirect,
                             </template>
                             <!-- VR: opacity TF preset + alpha scale slider/数値 (Phase A) -->
                             <template v-else>
-                                <div class="mv-tb-popover-label">Opacity preset</div>
+                                <div class="mv-tb-popover-label">
+                                    Opacity preset
+                                    <span v-if="prop.vrTfPresetId === 'custom'" class="mv-tb-tf-custom-tag">custom</span>
+                                </div>
                                 <select
-                                    class="mv-tb-tf-select mb-3"
+                                    class="mv-tb-tf-select mb-2"
                                     :value="prop.vrTfPresetId ?? 'ramp'"
                                     @change="(e: Event) => emit('setVrTfPreset', (e.target as HTMLSelectElement).value)"
                                 >
@@ -1666,9 +1674,18 @@ defineExpose({init, show, show2, showRgb, showDirect,
                                             :title="p.description">
                                         {{ p.label }}
                                     </option>
+                                    <option v-if="prop.vrTfPresetId === 'custom'" value="custom">Custom</option>
                                 </select>
 
-                                <div class="mv-tb-popover-label">Alpha scale (overall × TF)</div>
+                                <!-- D15: visual TF editor (control points) -->
+                                <VrTfEditor
+                                    :points="prop.vrTfPoints ?? [{ v: 0, a: 0 }, { v: 1, a: 1 }]"
+                                    :width="280"
+                                    :height="84"
+                                    @update:points="(pts) => emit('setVrTfPoints', pts)"
+                                />
+
+                                <div class="mv-tb-popover-label mt-2">Alpha scale (overall × TF)</div>
                                 <div class="mv-tb-slider-row">
                                     <v-slider
                                         :model-value="prop.mipAlphaScale ?? 0.06"
@@ -2024,6 +2041,18 @@ defineExpose({init, show, show2, showRgb, showDirect,
   border-radius: 3px;
 }
 .mv-tb-tf-select:focus { outline: none; border-color: var(--mv-accent); }
+.mv-tb-tf-custom-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  background: rgba(255, 210, 74, 0.15);
+  color: #FFD24A;
+  border-radius: 8px;
+}
 .mv-tb-shading-toggle {
   display: flex;
   align-items: center;
