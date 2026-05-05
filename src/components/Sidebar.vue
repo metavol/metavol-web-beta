@@ -35,9 +35,7 @@ const emit = defineEmits([
   "openSample",
   "presetSelected",
   "changeSlice",
-  "phantom1",
-  "phantom2",
-  "phantom3",
+  "phantomNema",
   "redraw",
   "setModality",
   "setActiveForSeg",
@@ -66,8 +64,6 @@ const onPresetToggle = (val: string | null | undefined) => {
 const changeSlice = (e: number) => emit("changeSlice", e);
 
 const showAdvanced = ref(false);
-const showSummary = ref(false);
-const showTag = ref(false);
 
 // PET Standard 候補スコアリングの編集可能ルール (localStorage 永続化)
 const priorityRules = ref<PriorityRule[]>(loadPriorityRules());
@@ -262,15 +258,14 @@ const onPetUnitChange = (v: 'SUV' | 'BqMl' | null | undefined) => {
       </div>
 
       <div v-if="showAdvanced" class="mt-2">
-        <div class="mv-section-title">Demo phantoms</div>
+        <div class="mv-section-title">Demo phantom</div>
         <div class="mv-btn-row">
-          <v-btn size="x-small" variant="tonal" @click="emit('phantom3')">Earth</v-btn>
-          <v-btn size="x-small" variant="tonal" @click="emit('phantom1')">Humanoid</v-btn>
-          <v-btn size="x-small" variant="tonal" @click="emit('phantom2')">Voronoi</v-btn>
+          <v-btn size="x-small" variant="tonal" @click="emit('phantomNema')">
+            NEMA IEC body
+          </v-btn>
         </div>
-        <div class="mt-2">
-          <v-switch label="Show summary" v-model="showSummary" hide-details density="compact" />
-          <v-switch label="Show tag" v-model="showTag" hide-details density="compact" />
+        <div class="text-caption text-disabled mt-1">
+          Standard PET QC phantom: 6 hot spheres in a warm body, cold lung insert.
         </div>
 
         <!-- PET Standard 候補スコアリングルール (ATTN > NAC、WB > Lung 等) -->

@@ -15,6 +15,8 @@ export type ImageBoxInfoBase = {
     description: string,
 }
 
+export type Interpolation = 'nearest' | 'bilinear';
+
 // Raw 1-frame DICOM viewer box (no MPR, no Volume reconstruction).
 // Counterpart of VolumeImageBoxInfo (3D 再構成スライス) / FusedVolumeImageBoxInfo (CT+PET 重畳)。
 export type DicomSliceImageBoxInfo = ImageBoxInfoBase &  {
@@ -23,9 +25,9 @@ export type DicomSliceImageBoxInfo = ImageBoxInfoBase &  {
     centerX:number,
     centerY:number
     zoom: number | null,
+    // Sampling 補間モード。default 'bilinear' (滑らか)。'nearest' で voxel 境界くっきり。
+    interpolation?: Interpolation,
 }
-
-export type Interpolation = 'nearest' | 'bilinear';
 
 export type VolumeImageBoxInfo = ImageBoxInfoBase & {
     centerInWorld:THREE.Vector3,

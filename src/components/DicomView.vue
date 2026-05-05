@@ -175,11 +175,6 @@ const selectedImageBoxId = ref(0);
 const isLoading = ref(false);
 const isEnter = ref(false);
 
-const showSummary = ref(false);
-const showTag = ref(false);
-const summaryText = ref('');
-const tagText = ref('');
-
 const imb = ref<InstanceType<typeof imagebox>[]>();
 
 interface SeriesList { // 複数のDICOMファイル、もしくはVolumeデータ、もしくは両方（同一画像）、、ということはnx,ny,nzを共有するという案もあるが・・
@@ -662,18 +657,25 @@ watch(tileN, async () => {
 
 const updateDebugHover = (boxId: number, e: MouseEvent) => {
   if (!debugMode.value) return;
-  if (!isAnyVolumeBox(boxId)) {
+  // DICOM slice / Volume / Fusion のいずれにも対応する。
+  // DICOM slice: 該当 series が myDicom のみ + volume 未生成のことがある → ensureVolume_ 経由で
+  //   一時的に volume を作ると重いので、ここでは volume があるシリーズのみ inspect する。
+  //   DICOM box でも (mpr_ 経由などで) volume が既に生成されていれば値が出る。
+  if (!isAnyVolumeBox(boxId) && !isDicomSliceImageBoxInfo(boxId)) {
     debugShow.value = false;
     return;
   }
   const [cx, cy] = getCanvasXY(e);
-  const w = screenToWorld(boxId, cx, cy);
+  const w = screenToWorldAny(boxId, cx, cy);
+  if (!w) { debugShow.value = false; return; }
   const rows: typeof debugHoverRows.value = [];
   for (let s = 0; s < seriesList.length; s++){
     const v = seriesList[s].volume;
     if (!v) continue;
     const vox = worldToVoxel_(w, s);
-    const i = Math.floor(vox.x), j = Math.floor(vox.y), k = Math.floor(vox.z);
+    // Voxel 中心 = 整数座標規約に合わせ floor(x+0.5) で nearest center を取る。
+    // (sampleNearest と一致させ、画面で見えるピクセルと inspector の値変化境界を揃える)
+    const i = Math.floor(vox.x + 0.5), j = Math.floor(vox.y + 0.5), k = Math.floor(vox.z + 0.5);
     const inBounds = i >= 0 && i < v.nx && j >= 0 && j < v.ny && k >= 0 && k < v.nz;
     const value = inBounds ? v.voxel[k * v.nx * v.ny + j * v.nx + i] : null;
     rows.push({
@@ -692,9 +694,10 @@ const updateDebugHover = (boxId: number, e: MouseEvent) => {
 const handleDebugEditClick = (boxId: number, e: MouseEvent) => {
   if (!debugMode.value) return false;
   if (!e.shiftKey) return false;
-  if (!isAnyVolumeBox(boxId)) return false;
+  if (!isAnyVolumeBox(boxId) && !isDicomSliceImageBoxInfo(boxId)) return false;
   const [cx, cy] = getCanvasXY(e);
-  const w = screenToWorld(boxId, cx, cy);
+  const w = screenToWorldAny(boxId, cx, cy);
+  if (!w) return false;
 
   // 編集対象シリーズを選択（Volume が複数なら一覧から選ばせる）
   const candidates: Array<{ idx: number; v: any; descr: string }> = [];
@@ -702,7 +705,7 @@ const handleDebugEditClick = (boxId: number, e: MouseEvent) => {
     const v = seriesList[s].volume;
     if (!v) continue;
     const vox = worldToVoxel_(w, s);
-    const i = Math.floor(vox.x), j = Math.floor(vox.y), k = Math.floor(vox.z);
+    const i = Math.floor(vox.x + 0.5), j = Math.floor(vox.y + 0.5), k = Math.floor(vox.z + 0.5);
     if (i < 0 || i >= v.nx || j < 0 || j >= v.ny || k < 0 || k >= v.nz) continue;
     candidates.push({
       idx: s,
@@ -727,7 +730,7 @@ const handleDebugEditClick = (boxId: number, e: MouseEvent) => {
 
   const target = seriesList[chosenIdx].volume!;
   const vox = worldToVoxel_(w, chosenIdx);
-  const i = Math.floor(vox.x), j = Math.floor(vox.y), k = Math.floor(vox.z);
+  const i = Math.floor(vox.x + 0.5), j = Math.floor(vox.y + 0.5), k = Math.floor(vox.z + 0.5);
   const idx = k * target.nx * target.ny + j * target.nx + i;
   const cur = target.voxel[idx];
   const resp = prompt(`Edit voxel value\n  series ${chosenIdx} (${target.metadata?.modality ?? '-'}) at (${i},${j},${k})\n  current: ${cur}\n\nNew value:`, String(cur));
@@ -1150,6 +1153,17 @@ const onTitlebarDuplicate = async (i: number) => {
   showImage(newId);
 };
 
+// Volume box の Reset W/L で使う、modality と SUV スケールを尊重した既定窓。
+// SUV 化された PT volume では DICOM タグの WC/WW (Bq/ml) はそのままだと真っ暗 / 飽和に
+// なるため、suvFactor 倍してから採用する。CT/MR は voxel と同スケールなのでそのまま。
+const defaultWcWwForVolume = (vol: { metadata?: { modality?: string; suvOk?: boolean; suvFactor?: number } } | null | undefined): { wc: number; ww: number } => {
+  const mod = (vol?.metadata?.modality ?? '').toUpperCase();
+  if (mod === 'PT' || mod === 'PET') return { wc: 3, ww: 6 };
+  if (mod === 'CT') return { wc: 40, ww: 400 };
+  if (mod === 'MR') return { wc: 500, ww: 1000 };
+  return { wc: 0, ww: 1000 };
+};
+
 const onTitlebarResetView = (i: number) => {
   const info = imageBoxInfos.value[i];
   if (!info) return;
@@ -1164,12 +1178,18 @@ const onTitlebarResetView = (i: number) => {
   } else if (isAnyVolumeBox(i)) {
     const d = info as VolumeImageBoxInfo;
     const vol = seriesList[d.currentSeriesNumber]?.volume;
-    d.myWC = null;
-    d.myWW = null;
+    // Volume の WC/WW は modality に応じた既定値を入れる (null → 0 で真っ暗化を避ける)。
+    // PT は SUV 既定 3/6、CT は abdominal 40/400、MR は適当な 500/1000、他は 0/1000。
+    const def = defaultWcWwForVolume(vol);
+    d.myWC = def.wc;
+    d.myWW = def.ww;
     if (isFusedImageBoxInfo(i)) {
       const f = d as FusedVolumeImageBoxInfo;
-      f.myWC1 = null;
-      f.myWW1 = null;
+      // Fusion: base = currentSeriesNumber、overlay = currentSeriesNumber1。
+      const ovVol = seriesList[f.currentSeriesNumber1]?.volume;
+      const ovDef = defaultWcWwForVolume(ovVol);
+      f.myWC1 = ovDef.wc;
+      f.myWW1 = ovDef.ww;
     }
     if (vol) {
       // 中心を volume 中点へ
@@ -1390,8 +1410,11 @@ const onSetOverlayAlpha = (i: number, v: number) => {
   showImage(i);
 };
 
-// 補間モード getter / setter (slice/MPR 用)
+// 補間モード getter / setter (slice/MPR 用)。DICOM slice / Volume / Fusion 全対応。
 const getBoxInterpolation = (i: number): 'nearest' | 'bilinear' | undefined => {
+  if (isDicomSliceImageBoxInfo(i)) {
+    return (imageBoxInfos.value[i] as DicomSliceImageBoxInfo).interpolation;
+  }
   if (!isAnyVolumeBox(i)) return undefined;
   return (imageBoxInfos.value[i] as VolumeImageBoxInfo).interpolation;
 };
@@ -1400,6 +1423,12 @@ const getBoxInterpolation1 = (i: number): 'nearest' | 'bilinear' | undefined => 
   return (imageBoxInfos.value[i] as FusedVolumeImageBoxInfo).interpolation1;
 };
 const onSetInterpolation = (i: number, payload: { layer: 'base' | 'overlay'; mode: 'nearest' | 'bilinear' }) => {
+  if (isDicomSliceImageBoxInfo(i)) {
+    // DICOM slice: layer は 'base' のみ意味あり (overlay は無いので無視)
+    (imageBoxInfos.value[i] as DicomSliceImageBoxInfo).interpolation = payload.mode;
+    showImage(i);
+    return;
+  }
   if (!isAnyVolumeBox(i)) return;
   if (payload.layer === 'overlay') {
     if (!isFusedImageBoxInfo(i)) return;
@@ -2083,9 +2112,56 @@ const doPan = (id: number, dx: number, dy: number) => {
   });
 };
 
+// Window/Level drag を実体化したヘルパ。
+//   - leftButtonFunction = 'window' の左ドラッグ
+//   - 任意のツール中の右クリックドラッグ
+//   いずれからも呼び出される。
+const applyWindowLevelDrag = (id: number, mvX: number, mvY: number) => {
+  const info = getDicomSliceImageBoxInfo;
+  // Fusion box かつ active layer = overlay なら overlay 側 (myWC1/myWW1) を変更
+  // それ以外 (Volume / DicomSlice / Fusion-base) は myWC/myWW を変更
+  const isFusionOverlay = isFusedImageBoxInfo(id)
+    && (imageBoxInfos.value[id] as FusedVolumeImageBoxInfo).activeWindowLayer !== 'base';
+  let wc: number | null, ww: number | null;
+  if (isFusionOverlay) {
+    const f = imageBoxInfos.value[id] as FusedVolumeImageBoxInfo;
+    wc = f.myWC1; ww = f.myWW1;
+  } else {
+    [wc, ww] = getMyWCWW(id);
+  }
+  // 旧 fallback: DICOM タグから値を読む。DICOM slice box でだけ意味がある。
+  if (wc === null && isDicomSliceImageBoxInfo(id)) {
+    const ds = seriesList[info(id).currentSeriesNumber]?.myDicom?.[info(id).currentSliceNumber];
+    if (ds) wc = Number(ds.string('x00281050', 0)) || 0;
+    else wc = 0;
+  }
+  if (ww === null && isDicomSliceImageBoxInfo(id)) {
+    const ds = seriesList[info(id).currentSeriesNumber]?.myDicom?.[info(id).currentSliceNumber];
+    if (ds) ww = Number(ds.string('x00281051', 0)) || 1;
+    else ww = 1;
+  }
+  if (wc === null) wc = 0;
+  if (ww === null) ww = 1;
+  const dmul = getBoxPetDisplayMul(id);
+  const minWW = dmul !== 0 ? 1 / dmul : 1;
+  wc += mvY / dmul;
+  ww += mvX / dmul;
+  if (ww < minWW) ww = minWW;
+  if (isFusionOverlay) {
+    const f = imageBoxInfos.value[id] as FusedVolumeImageBoxInfo;
+    f.myWC1 = wc; f.myWW1 = ww;
+  } else {
+    setMyWCWW(id, wc, ww);
+  }
+  show();
+};
+
+// 右クリックドラッグ中フラグ。mouseup で false に戻す。
+// onContextMenu でこのフラグが true なら menu を抑止 (drag 完了で menu 出さない)。
+const rightDragActive = ref(false);
+
 const mouseMove = (e: MouseEvent) => {
   const id = getIdOfEventOccured(e);
-  const info = getDicomSliceImageBoxInfo;
   const infoV = getVolumeImageBoxInfo;
 
   // デバッグ: マウス位置の voxel 値を更新
@@ -2100,39 +2176,17 @@ const mouseMove = (e: MouseEvent) => {
     return;
   }
 
+  // 右ボタンドラッグで常時 Window/Level (ツール選択に関係なく)。
+  // OHIF / RadiAnt 等の DICOM viewer の標準操作に揃える。
+  if ((e.buttons & 2) !== 0){
+    rightDragActive.value = true;
+    applyWindowLevelDrag(id, e.movementX, e.movementY);
+    return;
+  }
+
   if (leftButtonFunction.value == "window") {
     if (e.buttons == 1) {
-      // Fusion box かつ active layer = overlay なら overlay 側 (myWC1/myWW1) を変更
-      // それ以外 (Volume / DicomSlice / Fusion-base) は myWC/myWW を変更
-      const isFusionOverlay = isFusedImageBoxInfo(id)
-        && (imageBoxInfos.value[id] as FusedVolumeImageBoxInfo).activeWindowLayer !== 'base';
-      let wc: number | null, ww: number | null;
-      if (isFusionOverlay) {
-        const f = imageBoxInfos.value[id] as FusedVolumeImageBoxInfo;
-        wc = f.myWC1; ww = f.myWW1;
-      } else {
-        [wc, ww] = getMyWCWW(id);
-      }
-      if (wc === null) {
-        wc = Number(seriesList[info(id).currentSeriesNumber].myDicom![info(id).currentSliceNumber].string("x00281050", 0)) ?? 0;
-      }
-      if (ww === null) {
-        ww = Number(seriesList[info(id).currentSeriesNumber].myDicom![info(id).currentSliceNumber].string("x00281051", 0)) ?? 0;
-      }
-      // PT で BqMl 表示中: drag を「1 pixel = +1 display unit」と感じさせるため
-      // 内部 SUV 値への増分を 1/dmul (= suvFactor) 倍にする。それ以外は dmul=1 で従来通り。
-      const dmul = getBoxPetDisplayMul(id);
-      const minWW = dmul !== 0 ? 1 / dmul : 1;
-      wc += e.movementY / dmul;
-      ww += e.movementX / dmul;
-      if (ww < minWW) ww = minWW;
-      if (isFusionOverlay) {
-        const f = imageBoxInfos.value[id] as FusedVolumeImageBoxInfo;
-        f.myWC1 = wc; f.myWW1 = ww;
-      } else {
-        setMyWCWW(id, wc, ww);
-      }
-      show();
+      applyWindowLevelDrag(id, e.movementX, e.movementY);
     }
   }
 
@@ -2461,10 +2515,20 @@ const polygonUndo = () => {
 };
 
 const onContextMenu = (e: MouseEvent) => {
+  // 右ドラッグ直後 (= W/L drag が終わった) のときは context menu を抑止し、フラグだけリセット。
+  if (rightDragActive.value){
+    e.preventDefault();
+    rightDragActive.value = false;
+    return;
+  }
   if (leftButtonFunction.value === "polygonROI" && segStore.polygon?.inProgress){
     e.preventDefault();
     finalizePolygon();
+    return;
   }
+  // 右クリック単独 (ドラッグなし) でも、誤って context menu が出ると操作が中断するため
+  // 画像エリアでは常に抑止する。
+  e.preventDefault();
 };
 
 const onDblClick = (e: MouseEvent) => {
@@ -2735,14 +2799,6 @@ const doSort = () => {
 
   detectPetCtFromDicom();
   rebuildSeriesSummaries();
-
-  summaryText.value = "";
-  // for (let i=0; i<serieses.length; i++){
-  //   summaryText.value += `${serieses[i]}  ${seriesList[i].length} images \n`;
-  // }
-  // for (let i=0; i<volumeList.length; i++){
-  //   summaryText.value += `${volumeList[i].nx} ${volumeList[i].ny} ${volumeList[i].ny} \n`;
-  // }
 };
 
 
@@ -2964,6 +3020,22 @@ const decompressAllJpegLossless = async (): Promise<void> => {
   const perFrame = (ms / targets.length).toFixed(2);
   console.log(`[jpeg-lossless] decompressed ${jpegDecompressDone.value} frames in ${ms.toFixed(0)}ms (${perFrame} ms/frame, ${backend})`);
   jpegDecompressInProgress.value = false;
+};
+
+// "Load files…" ボタンから開く隠し input。drag&drop と同じ loadFiles に流す。
+// folder picker は File System Access API がブラウザによって挙動差があるため、
+// ここではシンプルに multiple file picker を採用 (.dcm / .nii / .nii.gz)。
+const hiddenLoadInput = ref<HTMLInputElement | null>(null);
+const onClickLoad = () => {
+  hiddenLoadInput.value?.click();
+};
+const onHiddenLoadInputChange = (e: Event) => {
+  const inp = e.target as HTMLInputElement;
+  if (inp.files && inp.files.length > 0) {
+    loadFiles(inp.files);
+  }
+  // 同じファイルを連続で選び直せるように value をクリア
+  inp.value = '';
 };
 
 const loadFiles = (files: FileList | File[]) => {
@@ -3271,10 +3343,6 @@ const showImage = (i:number) => {
 
     const dataSet = seriesList[j].myDicom![info.currentSliceNumber];
 
-    if (showTag.value && i == selectedImageBoxId.value){
-      tagText.value = DicomLib.allDicomTagToString(dataSet);
-    }
-
     try {
       if (dataSet === undefined) {
         imb.value![i].clear();
@@ -3340,7 +3408,8 @@ const showImage = (i:number) => {
         } else {
           const i16a = new Int16Array(buf, offset, length / 2);
           imb.value![i].show(
-            i16a, rows, cols, wc, ww, intercept, slope, centerX, centerY, zoom
+            i16a, rows, cols, wc, ww, intercept, slope, centerX, centerY, zoom,
+            info.interpolation ?? 'bilinear'
           );
         }
       }
@@ -3533,6 +3602,54 @@ const screenToWorld = (imageBoxNumber: number, x: number, y:number) => {
   world.add(a.centerInWorld).addScaledVector(a.vecx,x-imageBoxW.value!/2).addScaledVector(a.vecy,y-imageBoxH.value!/2);
   return world;
 }
+
+// DICOM slice box の canvas (x, y) → world (mm)。
+// 表示中の slice K の DICOM タグ
+//   (0020,0032) ImagePositionPatient   = ipp
+//   (0020,0037) ImageOrientationPatient = orient (6 floats)
+//   (0028,0030) PixelSpacing            = pixSpacing
+//   (0028,0010/0011) Rows / Columns
+// と info.zoom / info.centerX/Y を使い、ImageBox.drawImageCvZoom と同じ
+// 「fx = (x - canvas/2)/zoom + nx/2 + shiftX」ピクセル変換を逆走り。
+const screenToWorldDicomSlice = (boxId: number, cx: number, cy: number): THREE.Vector3 | null => {
+  if (!isDicomSliceImageBoxInfo(boxId)) return null;
+  const info = imageBoxInfos.value[boxId] as DicomSliceImageBoxInfo;
+  const series = seriesList[info.currentSeriesNumber];
+  const ds = series?.myDicom?.[info.currentSliceNumber];
+  if (!ds) return null;
+  const cols = ds.int16('x00280011') ?? 0;
+  const rows = ds.int16('x00280010') ?? 0;
+  if (!cols || !rows) return null;
+  const ps0 = ds.floatString('x00280030', 0);
+  const ps1 = ds.floatString('x00280030', 1);
+  const o0 = ds.floatString('x00200037', 0);
+  const o1 = ds.floatString('x00200037', 1);
+  const o2 = ds.floatString('x00200037', 2);
+  const o3 = ds.floatString('x00200037', 3);
+  const o4 = ds.floatString('x00200037', 4);
+  const o5 = ds.floatString('x00200037', 5);
+  const i0 = ds.floatString('x00200032', 0);
+  const i1 = ds.floatString('x00200032', 1);
+  const i2 = ds.floatString('x00200032', 2);
+  if (ps0 == null || o0 == null || i0 == null) return null;
+  const vecRow = new THREE.Vector3(o0, o1!, o2!).multiplyScalar(ps0!);  // 1 col-step
+  const vecCol = new THREE.Vector3(o3!, o4!, o5!).multiplyScalar(ps1!); // 1 row-step
+  const ipp = new THREE.Vector3(i0, i1!, i2!);
+  const canvasW = imageBoxW.value!;
+  const canvasH = imageBoxH.value!;
+  const zoom = info.zoom ?? 1;
+  const fx = (cx - canvasW / 2) / zoom + cols / 2 + info.centerX;
+  const fy = (cy - canvasH / 2) / zoom + rows / 2 + info.centerY;
+  return ipp.clone().addScaledVector(vecRow, fx).addScaledVector(vecCol, fy);
+};
+
+// 統合: Volume / Fusion / DICOM slice いずれの box でも canvas → world を返す。
+const screenToWorldAny = (boxId: number, cx: number, cy: number): THREE.Vector3 | null => {
+  if (boxId < 0 || boxId >= imageBoxInfos.value.length) return null;
+  if (isAnyVolumeBox(boxId)) return screenToWorld(boxId, cx, cy);
+  if (isDicomSliceImageBoxInfo(boxId)) return screenToWorldDicomSlice(boxId, cx, cy);
+  return null;
+};
 
 const voxelToWorld_ = (p: THREE.Vector3, vol_id:number) => {
   const v = seriesList[vol_id].volume!;
@@ -3986,6 +4103,7 @@ const mpr_ = (seriesIdx: number, boxId?: number): boolean => {
   if (!ensureVolume_(seriesIdx)) return false;
   const targetBoxId = boxId ?? seriesIdx;
   const oldInfo = imageBoxInfos.value[targetBoxId];
+  const oldIsDicomSlice = oldInfo != null && 'currentSliceNumber' in oldInfo;
   const d = seriesList[seriesIdx].volume!;
   const p0 = voxelToWorld_(new THREE.Vector3(0,0,0), seriesIdx);
   const p1 = voxelToWorld_(new THREE.Vector3(d.nx,d.ny, d.nz), seriesIdx);
@@ -4016,8 +4134,21 @@ const mpr_ = (seriesIdx: number, boxId?: number): boolean => {
     fallbackWC = dHasWindow ? dWC : 0;
     fallbackWW = dHasWindow ? dWW : 1000;
   }
-  const wc = oldInfo?.myWC ?? fallbackWC;
-  const ww = oldInfo?.myWW ?? fallbackWW;
+  // 旧 box の WC/WW は単位が voxel スケールと一致しているか?
+  //   - 旧 box が DICOM slice の場合: voxel は raw DICOM (intercept/slope 適用済) スケール、
+  //     WC/WW も同じスケール。volume 化により PT は SUV 倍されるため WC/WW を suvFactor 倍する。
+  //     CT/MR/その他は volume と DICOM slice で同一スケール (HU/MR 値) なのでそのまま継承。
+  //   - 旧 box が Volume の場合: WC/WW はすでに volume と同スケール → そのまま継承。
+  let wc = fallbackWC, ww = fallbackWW;
+  if (oldInfo?.myWC != null && oldInfo?.myWW != null) {
+    if (oldIsDicomSlice && isPt && d.metadata?.suvOk && d.metadata.suvFactor) {
+      wc = oldInfo.myWC * d.metadata.suvFactor;
+      ww = oldInfo.myWW * d.metadata.suvFactor;
+    } else {
+      wc = oldInfo.myWC;
+      ww = oldInfo.myWW;
+    }
+  }
   // CLUT 継承: 旧 box が CLUT を持つなら維持。それ以外は modality 既定 (PT は white2black)
   const oldClut = (oldInfo as VolumeImageBoxInfo)?.clut;
   const clut = (typeof oldClut === 'number') ? oldClut : (isPt ? 1 : 0);
@@ -4208,24 +4339,19 @@ const switchToSMip = (doShow: boolean) => {
   }
 }
 
-const phantom1 = () => {
-  const P = Phantom.generatePhantom();
+const phantomNema = () => {
+  const P = Phantom.generatePhantomNema();
   const c = pushVolume(seriesList, P);
+  // PT phantom: SUV-aware default window (0..16 → wc=8, ww=16 covers warm + hot spheres),
+  // hot CLUT for visibility, sensible description.
+  c.myWC = 8;
+  c.myWW = 16;
+  c.clut = 1;
+  c.description = 'NEMA IEC Body Phantom';
   imageBoxInfos.value[selectedImageBoxId.value] = c;
+  refreshSegStoreVolumeRefs();
+  rebuildSeriesSummaries();
   show();
-}
-const phantom2 = () => {
-  const P = Phantom.generatePhantom2();
-  const c = pushVolume(seriesList, P);
-  imageBoxInfos.value[selectedImageBoxId.value] = c;
-  show();
-}
-
-const phantom3 = () => {
-  const P = Phantom.generatePhantom3();
-  const c = pushVolume(seriesList, P);
-  imageBoxInfos.value[selectedImageBoxId.value] = c;
-  switchToSMip(true);
 }
 
 const runDebugger = () => {
@@ -4786,6 +4912,8 @@ defineExpose({
   setupPtOnly4up,
   setupCompare2up,
   loadTestDicom,
+  // ハンバーガーメニューの "Load files…" から呼ぶための公開エントリ
+  loadFiles,
   disableAutoFit,
   fitToWindow,
   seriesSummariesPublic: seriesSummaries,
@@ -4845,9 +4973,7 @@ defineExpose({
       @setActiveForSeg="onSetActiveForSeg"
       @inspectRaw="(p: { index: number }) => inspectNiftiRaw(p.index)"
       @viewHeader="(p: { index: number }) => onViewNiftiHeader(p.index)"
-      @phantom1="phantom1"
-      @phantom2="phantom2"
-      @phantom3="phantom3"
+      @phantomNema="phantomNema"
       @redraw="show"
     />
   </v-navigation-drawer>
@@ -4879,9 +5005,29 @@ defineExpose({
        @drop.prevent="(e: DragEvent) => dropFile(e)">
     <!-- 起動直後 / Close all 後の empty state。box ゼロ時のみ表示 -->
     <div v-if="(tileN ?? 0) === 0" class="mv-imagearea-empty">
-      <v-icon icon="mdi-image-off-outline" size="56" />
-      <span class="mv-imagearea-empty-title">No image</span>
-      <span class="mv-imagearea-empty-hint">Drop DICOM or NIfTI files (.nii / .nii.gz) here</span>
+      <v-icon icon="mdi-tray-arrow-down" size="56" />
+      <span class="mv-imagearea-empty-title">Drop files here to start</span>
+      <span class="mv-imagearea-empty-hint">DICOM folders or NIfTI files (.nii / .nii.gz)</span>
+      <div class="mt-3">
+        <v-btn
+          color="primary"
+          variant="flat"
+          size="small"
+          prepend-icon="mdi-folder-open-outline"
+          @click="onClickLoad"
+        >Load files…</v-btn>
+        <input
+          ref="hiddenLoadInput"
+          type="file"
+          multiple
+          accept=".dcm,.nii,.nii.gz,.gz,application/dicom,application/octet-stream"
+          style="display: none"
+          @change="onHiddenLoadInputChange"
+        />
+      </div>
+      <span class="mv-imagearea-empty-hint mv-empty-link-hint mt-3">
+        To add more later, use the <v-icon icon="mdi-menu" size="small" /> menu in the top-left.
+      </span>
       <span class="mv-imagearea-empty-hint mv-empty-link-hint">
         Or share a link with <code>?url=https://your-host/scan.nii.gz</code>
         (multiple <code>?url=</code> params allowed; CORS-permitted hosts only)
@@ -4964,9 +5110,6 @@ defineExpose({
         @toggle-vr-demo="onToggleVrDemo(i-1)"
       />
     </div>
-
-    <textarea v-if="showSummary" v-model="summaryText" style="height: auto;" />
-    <textarea v-if="showTag" v-model="tagText" style="height: 400px;" />
 
     <!-- Debug: voxel hover inspector -->
     <DebugInspector

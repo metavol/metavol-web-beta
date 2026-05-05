@@ -207,6 +207,13 @@ Volume 単独 / Fusion 両方をハンドル（`isVolumeImageBoxInfo` は `clut1
 - `nifti-reader-js` の affine からは Volume は作れるが modality は不明 → PET/CT 検出が動かない。
 - 回避: ユーザに「PET として登録」「CT として登録」ボタンを提供する（未実装）。
 
+### 5. GPU mode で voxel inspector の Shift+Click 編集が画像に反映されない
+- 症状: Voxel inspector で Shift+Click → prompt() で値を入力 → `Volume.voxel[idx]` には書き込まれ、inspector 表示も更新されるが、画面の画像は変わらない (色が変化しない)。
+- 原因: GPU レンダリングパスは `volumeCache` (`src/components/webgpu/volumeCache.ts`) で voxel TypedArray を WebGPU テクスチャにアップロードしてキャッシュしている。voxel を 1 セルだけ書き換えても、cache key (= TypedArray 参照) が同じなので texture が再アップロードされない。
+- 影響範囲: 開発デバッグ用機能 (一般ユーザは使わない)。CPU mode (Force CPU) なら正しく反映される。
+- 対応方針: 当面 known issue として放置。修正するなら voxel 編集時に `volumeCache.invalidate(target)` を呼ぶ、または `Volume.dataVersion: number` フィールドを追加して cache key に含める。前者が安全。
+- ワークアラウンド: 編集前に Renderer mode を Force CPU に切り替える。
+
 ---
 
 ## デザイン

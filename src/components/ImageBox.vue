@@ -253,9 +253,9 @@ onMounted(() => {
   init();
 });
 
-const show = (ppp: Float32Array | Int16Array, cols: number, rows: number, wc: number, ww: number, intercept: number, slope: number, centerX:number, centerY:number, zoom: number) => {
+const show = (ppp: Float32Array | Int16Array, cols: number, rows: number, wc: number, ww: number, intercept: number, slope: number, centerX:number, centerY:number, zoom: number, interpolation: 'nearest' | 'bilinear' = 'bilinear') => {
     isEmpty.value = false;
-    drawImageCvZoom(ppp, cols, rows, wc, ww, intercept, slope, centerX, centerY, zoom);
+    drawImageCvZoom(ppp, cols, rows, wc, ww, intercept, slope, centerX, centerY, zoom, interpolation);
 }
 
 const showDirect = (ppp: Float32Array | Int16Array, wc: number, ww: number) => {
@@ -273,10 +273,12 @@ const showRgb = (ppp: Uint8Array, cols: number, rows: number, centerX:number, ce
     drawImageCvRgb(ppp, cols, rows, centerX, centerY, zoom);
 }
 
-// Bilinear sampling 版。zoom in 時のジャギー (nearest) を解消するため
-// fractional pixel 座標で 4 近傍を線形補間する。範囲外は黒背景。
-// 端 (fx >= nx-1 等) は x1 = clamp(x0+1, ≤nx-1) で stretched 1px に丸める。
-const drawImageCvZoom = async function(pix: Float32Array | Int16Array, ny:number, nx:number, wc:number, ww:number, intercept:number, slope:number, shiftX:number, shiftY:number, zoom:number) {
+// Bilinear / Nearest 補間版。
+//   bilinear: zoom in 時のジャギーを解消するため fractional pixel 座標で 4 近傍を線形補間。
+//   nearest:  voxel 境界をくっきり見たいケース用。voxel 中心 = 整数規約に合わせ
+//             floor(v + 0.5) で最近傍 cell を選ぶ (sampleNearest と同じ規約)。
+// 範囲外は黒背景。端 (fx >= nx-1 等) は x1 = clamp(x0+1, ≤nx-1) で stretched 1px に丸める。
+const drawImageCvZoom = async function(pix: Float32Array | Int16Array, ny:number, nx:number, wc:number, ww:number, intercept:number, slope:number, shiftX:number, shiftY:number, zoom:number, interpolation: 'nearest' | 'bilinear' = 'bilinear') {
   if (cv1.value === null || ctx === null) return;
   const canvasx = cv1.value.width;
   const canvasy = cv1.value.height;
@@ -297,17 +299,26 @@ const drawImageCvZoom = async function(pix: Float32Array | Int16Array, ny:number
         ad += 4;
         continue;
       }
-      const x0 = Math.floor(fx);
-      const y0 = Math.floor(fy);
-      const x1 = x0 + 1 < nx ? x0 + 1 : x0;
-      const y1 = y0 + 1 < ny ? y0 + 1 : y0;
-      const dx = fx - x0;
-      const dy = fy - y0;
-      const v00 = pix[x0 + y0*nx];
-      const v10 = pix[x1 + y0*nx];
-      const v01 = pix[x0 + y1*nx];
-      const v11 = pix[x1 + y1*nx];
-      const v = (v00*(1-dx) + v10*dx) * (1-dy) + (v01*(1-dx) + v11*dx) * dy;
+      let v: number;
+      if (interpolation === 'nearest') {
+        const xi = Math.floor(fx + 0.5);
+        const yi = Math.floor(fy + 0.5);
+        const xc = xi >= nx ? nx - 1 : xi;
+        const yc = yi >= ny ? ny - 1 : yi;
+        v = pix[xc + yc * nx];
+      } else {
+        const x0 = Math.floor(fx);
+        const y0 = Math.floor(fy);
+        const x1 = x0 + 1 < nx ? x0 + 1 : x0;
+        const y1 = y0 + 1 < ny ? y0 + 1 : y0;
+        const dx = fx - x0;
+        const dy = fy - y0;
+        const v00 = pix[x0 + y0*nx];
+        const v10 = pix[x1 + y0*nx];
+        const v01 = pix[x0 + y1*nx];
+        const v11 = pix[x1 + y1*nx];
+        v = (v00*(1-dx) + v10*dx) * (1-dy) + (v01*(1-dx) + v11*dx) * dy;
+      }
       const raw = v * slope + intercept;
       let p = (raw - lo) * scale;
       if (p<0) p=0;
@@ -1414,8 +1425,10 @@ defineExpose({init, show, show2, showRgb, showDirect,
     <div class="drop_area mv-box"
         @dragover.prevent
         :class="{enter: isEnter, 'is-selected': prop.selected, 'is-enter-style': prop.isEnter}">
+        <!-- Titlebar 全体クリックで box を選択させたい (DicomView 側 @click="imageBoxClicked")。
+             以前は @click.stop だったため titlebar クリックでは選択されなかった。
+             modality-chip / actions / mod-chip のドラッグなどは個別に @click.stop を持つ。 -->
         <div class="mv-titlebar"
-             @click.stop
              @dblclick="emit('maximize')">
             <span class="mv-mod-chip"
                   :class="{ 'mv-mod-chip--draggable': isModalityChipDraggable() }"
@@ -1520,11 +1533,13 @@ defineExpose({init, show, show2, showRgb, showDirect,
 
                 <!-- 補間モード切替: slice/MPR の base / overlay を nearest / bilinear に。
                      MIP / VR 表示中は補間概念がないため非表示。
-                     VolumeBox: 単一メニュー (Nearest / Bilinear)
-                     FusionBox: 2 階層 (Base → / Overlay → → Nearest / Bilinear) -->
+                     DicomSliceBox: 単一メニュー (Nearest / Bilinear)
+                     VolumeBox:    単一メニュー
+                     FusionBox:    2 階層 (Base → / Overlay → → Nearest / Bilinear) -->
                 <v-menu
-                    v-if="(prop.boxKind === 'volume' || prop.boxKind === 'fusion')
-                          && (prop.currentPlane === 'axi' || prop.currentPlane === 'cor' || prop.currentPlane === 'sag')"
+                    v-if="prop.boxKind === 'dicom'
+                          || ((prop.boxKind === 'volume' || prop.boxKind === 'fusion')
+                              && (prop.currentPlane === 'axi' || prop.currentPlane === 'cor' || prop.currentPlane === 'sag'))"
                     location="bottom end"
                 >
                     <template v-slot:activator="{ props: act }">
@@ -1533,8 +1548,8 @@ defineExpose({init, show, show2, showRgb, showDirect,
                             <v-tooltip activator="parent" location="bottom">Sampling (interpolation)</v-tooltip>
                         </v-btn>
                     </template>
-                    <!-- VolumeBox: 直接 nearest/bilinear -->
-                    <v-list v-if="prop.boxKind === 'volume'" density="compact">
+                    <!-- DicomSliceBox / VolumeBox: 直接 nearest/bilinear -->
+                    <v-list v-if="prop.boxKind === 'volume' || prop.boxKind === 'dicom'" density="compact">
                         <v-list-item :active="(prop.interpolation ?? 'bilinear') === 'bilinear'"
                                      @click="emit('setInterpolation', { layer: 'base', mode: 'bilinear' })">
                             <v-list-item-title>Bilinear (smooth)</v-list-item-title>

@@ -12,6 +12,24 @@
             />
           </template>
           <v-list density="compact">
+            <v-list-item @click="onClickLoadFromMenu">
+              <template v-slot:prepend>
+                <v-icon icon="mdi-folder-open-outline" size="small" />
+              </template>
+              <v-list-item-title>Load files…</v-list-item-title>
+              <v-list-item-subtitle>DICOM or NIfTI (added to existing series)</v-list-item-subtitle>
+            </v-list-item>
+            <input
+              ref="appBarLoadInput"
+              type="file"
+              multiple
+              accept=".dcm,.nii,.nii.gz,.gz,application/dicom,application/octet-stream"
+              style="display: none"
+              @change="onAppBarLoadInputChange"
+            />
+
+            <v-divider />
+
             <v-list-item @click="drawerLeft = !drawerLeft">
               <template v-slot:prepend>
                 <v-icon icon="mdi-dock-left" size="small" />
@@ -397,22 +415,6 @@
       <v-btn
         class="mv-tool-btn"
         variant="text" size="small"
-        @click="changeImageBoxSize(-50)"
-      >
-        <v-icon icon="mdi-magnify-minus-outline" />
-        <v-tooltip activator="parent" location="bottom">Smaller</v-tooltip>
-      </v-btn>
-      <v-btn
-        class="mv-tool-btn"
-        variant="text" size="small"
-        @click="changeImageBoxSize(50)"
-      >
-        <v-icon icon="mdi-magnify-plus-outline" />
-        <v-tooltip activator="parent" location="bottom">Larger</v-tooltip>
-      </v-btn>
-      <v-btn
-        class="mv-tool-btn"
-        variant="text" size="small"
         @click="fitToWindow"
       >
         <v-icon icon="mdi-fit-to-screen-outline" />
@@ -521,13 +523,22 @@
       </v-menu>
 
       <v-btn
-        class="mv-tool-btn"
+        :class="['mv-tool-btn', { 'is-active': !!shareCopiedMsg }]"
         variant="text"
         size="small"
         @click="onCopyShareUrl"
       >
-        <v-icon icon="mdi-share-variant-outline" />
-        <v-tooltip activator="parent" location="bottom">{{ shareCopiedMsg || 'Copy share URL (current view)' }}</v-tooltip>
+        <v-icon :icon="shareCopiedMsg ? 'mdi-check' : 'mdi-share-variant-outline'" />
+        <v-tooltip activator="parent" location="bottom">
+          <template v-if="shareCopiedMsg">{{ shareCopiedMsg }}</template>
+          <template v-else>
+            <div>Copy a shareable link to your clipboard</div>
+            <div style="opacity: 0.7; font-size: 11px;">
+              The link reproduces the current layout, window/level, and (if any) the source URL.
+              Open it on another machine — DICOM/NIfTI must be reachable via <code>?url=</code>.
+            </div>
+          </template>
+        </v-tooltip>
       </v-btn>
 
       <v-btn
@@ -695,23 +706,22 @@ const tools = [
   { value: 'assignLabel',icon: 'mdi-tag-outline',           label: 'Assign Label' },
 ];
 
-const changeImageBoxSize = (d: number) => {
-  // 現在のアスペクト比を保持したまま縦サイズを d だけ増減 (横は比例変化)
-  const curH = imageBoxH.value || 1;
-  const curW = imageBoxW.value || 1;
-  const ratio = curW / curH;
-  let h = curH + d;
-  if (h < 100) h = 100;
-  if (h > 1500) h = 1500;
-  const w = Math.max(100, Math.round(h * ratio));
-  imageBoxH.value = h;
-  imageBoxW.value = w;
-  // 手動サイズ変更で autoFit を解除
-  dicomViewRef.value?.disableAutoFit?.();
-};
-
 const fitToWindow = () => {
   dicomViewRef.value?.fitToWindow?.();
+};
+
+// "Load files…" (ハンバーガーメニュー) から OS のファイルピッカーを開く。
+// 選択されたファイルは DicomView.loadFiles に流す → 既存 series に append される。
+const appBarLoadInput = ref<HTMLInputElement | null>(null);
+const onClickLoadFromMenu = () => {
+  appBarLoadInput.value?.click();
+};
+const onAppBarLoadInputChange = (e: Event) => {
+  const inp = e.target as HTMLInputElement;
+  if (inp.files && inp.files.length > 0) {
+    dicomViewRef.value?.loadFiles?.(inp.files);
+  }
+  inp.value = '';
 };
 
 const clickItem = (e: any) => {
@@ -853,17 +863,23 @@ const jpegProgress = computed(() => {
 });
 
 // "Copy share URL" — 現在 layout を URL ?state= に encode してクリップボード。
+// ローカル D&D ファイルは URL に乗らないので、`?url=` でサーバから fetch 可能なときだけ
+// リモートで再現できる旨を Tooltip で説明する。
 const shareCopiedMsg = ref<string>('');
 const onCopyShareUrl = async () => {
   const url = dicomViewRef.value?.buildShareUrl?.();
-  if (!url) { shareCopiedMsg.value = 'No view to share'; setTimeout(() => shareCopiedMsg.value = '', 2000); return; }
+  if (!url) {
+    shareCopiedMsg.value = 'Nothing to share — load images first';
+    setTimeout(() => shareCopiedMsg.value = '', 3000);
+    return;
+  }
   try {
     await navigator.clipboard.writeText(url);
-    shareCopiedMsg.value = 'Copied!';
+    shareCopiedMsg.value = `Copied to clipboard (${url.length} chars)`;
   } catch {
-    try { window.prompt('Copy this URL:', url); shareCopiedMsg.value = 'Shown'; } catch {}
+    try { window.prompt('Copy this URL:', url); shareCopiedMsg.value = 'Shown — copy manually'; } catch {}
   }
-  setTimeout(() => shareCopiedMsg.value = '', 2000);
+  setTimeout(() => shareCopiedMsg.value = '', 3000);
 };
 
 // nii.gz gunzip 進捗 (累計 MB)。最終サイズは gzip 形式上事前取得困難のため進捗 % は出さず
