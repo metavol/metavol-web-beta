@@ -355,6 +355,79 @@ const onLoadSnapshotFile = async (e: Event) => {
     }
 };
 
+// PDF lesion report. jsPDF を動的 import し pdfReport.ts (lazy chunk) で組み立て。
+const pdfBusy = ref(false);
+const onExportPdf = async () => {
+    const pet = store.petVolumeRef;
+    if (!pet) {
+        alert('Load a PT volume first.');
+        return;
+    }
+    pdfBusy.value = true;
+    try {
+        const { generateReport } = await import('./segmentation/pdfReport');
+        // 1 frame 譲って spinner を反映
+        await new Promise(r => setTimeout(r, 30));
+
+        // threshold の人間向け短文を組み立てる
+        const tu = store.thresholdUnit;
+        // jsPDF Helvetica は WinAnsi のみ。≥ ≤ × σ 等は Latin-1 互換代替で書く。
+        const thrLabel = (() => {
+            switch (store.thresholdMethod) {
+                case 'fixed':        return `${tu} >= ${store.threshold.toFixed(2)}`;
+                case 'pctMax':       return `${(store.thresholdPct * 100).toFixed(0)}% of VOI/volume SUVmax`;
+                case 'liverPercist': return `PERCIST: 1.5x liver + 2 SD`;
+                case 'liverPct':     return `${(store.thresholdPct * 100).toFixed(0)}% of liver SUVmean`;
+                default:             return String(store.thresholdMethod);
+            }
+        })();
+
+        // active tracer の表示名 (preset があれば)
+        const tracerName = store.activeTracerId
+            ? (_tracerById(store.activeTracerId)?.label ?? store.activeTracerId)
+            : null;
+
+        // lesions を pdfReport が期待する形 (colorRgb 付き) に整形
+        const labelColorById = new Map<number, [number, number, number]>();
+        for (const l of store.labels) labelColorById.set(l.id, l.color);
+        const lesions = lesionRows.value.map(r => ({
+            ...r,
+            colorRgb: labelColorById.get(r.labelId) ?? [180, 180, 180] as [number, number, number],
+        }));
+
+        // 最高 Deauville score (deauvilleScore は単一 lesion の関数なので max を取る)
+        let highest: { score: number; label: string } | null = null;
+        if (deauvilleSummary.value) {
+            for (const r of lesionRows.value) {
+                const s = deauvilleScore(r.suvMax);
+                if (s && (!highest || s.score > highest.score)) highest = s;
+            }
+        }
+
+        await generateReport({
+            seriesUid: pet.metadata?.seriesUID,
+            seriesDescription: pet.metadata?.seriesDescription,
+            petModality: pet.metadata?.modality,
+            suvOk: pet.metadata?.suvOk ?? null,
+            suvSourceLabel: suvOkLabel.value,
+            suvWarning: suvWarning.value,
+            thresholdMethod: store.thresholdMethod,
+            thresholdValue: store.threshold,
+            thresholdLabel: thrLabel,
+            activeTracerName: tracerName,
+            referenceLiverSuvMean: store.referenceSpheres.liver?.suvMean ?? null,
+            referenceBloodPoolSuvMean: store.referenceSpheres.bloodPool?.suvMean ?? null,
+            lesions,
+            totals: lesionTotals.value,
+            deauvilleHighest: highest,
+        });
+    } catch (err: any) {
+        alert(`Failed to export PDF: ${err?.message ?? err}`);
+    } finally {
+        pdfBusy.value = false;
+    }
+};
+
 const readFileAsArrayBuffer = (f: File): Promise<ArrayBuffer> =>
     new Promise((resolve, reject) => {
         const r = new FileReader();
@@ -1361,6 +1434,19 @@ const polygonModeProxy = computed({
                     </v-btn>
                     <v-btn size="small" variant="text" @click="onLoadSnapshotClick">
                         <v-icon icon="mdi-upload" size="small" class="mr-1" />Load .mvs
+                    </v-btn>
+                </div>
+                <div class="mv-btn-row mt-1">
+                    <v-btn
+                        size="small"
+                        variant="tonal"
+                        color="primary"
+                        :disabled="!store.hasPet || pdfBusy"
+                        @click="onExportPdf"
+                        title="Export 1-page PDF report (lesion table + screenshots + threshold rationale)"
+                    >
+                        <v-icon icon="mdi-file-pdf-box" size="small" class="mr-1" />
+                        {{ pdfBusy ? '…' : 'Export PDF report' }}
                     </v-btn>
                 </div>
                 <input
