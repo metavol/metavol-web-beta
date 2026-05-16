@@ -183,6 +183,14 @@
             <v-list-item-title>Load snapshot…</v-list-item-title>
             <v-list-item-subtitle>Pick a previously saved .json (load images first)</v-list-item-subtitle>
           </v-list-item>
+          <v-divider />
+          <v-list-item @click="onExportRois">
+            <template v-slot:prepend>
+              <v-icon icon="mdi-vector-rectangle" size="small" />
+            </template>
+            <v-list-item-title>Export ROIs…</v-list-item-title>
+            <v-list-item-subtitle>Download .json with rectangle ROIs (voxel coordinates)</v-list-item-subtitle>
+          </v-list-item>
         </v-list>
       </v-menu>
       <input
@@ -755,6 +763,7 @@ const tools = [
   { value: 'zoom',       icon: 'mdi-magnify-plus-outline',  label: 'Zoom' },
   { value: 'page',       icon: 'mdi-arrow-up-down',         label: 'Page' },
   { value: 'sphereROI',  icon: 'mdi-circle-outline',        label: 'Sphere ROI' },
+  { value: 'rectROI',    icon: 'mdi-rectangle-outline',     label: 'Rectangle ROI' },
   { value: 'polygonROI', icon: 'mdi-pentagon-outline',      label: 'Polygon ROI' },
   { value: 'assignLabel',icon: 'mdi-tag-outline',           label: 'Assign Label' },
 ];
@@ -959,6 +968,13 @@ const onSaveSnapshot = () => {
 const snapshotLoadInput = ref<HTMLInputElement | null>(null);
 const onLoadSnapshot = () => {
   snapshotLoadInput.value?.click();
+};
+const onExportRois = () => {
+  try {
+    dicomViewRef.value?.exportRoisAsJson?.();
+  } catch (err: any) {
+    setSnapshotMsg('ROI export failed: ' + (err?.message ?? err));
+  }
 };
 const onSnapshotInputChange = async (e: Event) => {
   const inp = e.target as HTMLInputElement;

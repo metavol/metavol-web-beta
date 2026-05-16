@@ -35,6 +35,18 @@ export interface UndoEntry {
     before: Uint16Array;
 }
 
+// 矩形 ROI。ドラッグした対角線の 2 隅を voxel 座標で保持する。
+// topLeft / bottomRight は当該 series の voxel index 空間 (= ワールド座標ではない)。
+// volume box 上で配置した場合は through-plane の voxel index も保持する。
+export interface RectROI {
+    id: number;
+    seriesIndex: number;          // どの series の voxel 空間か (seriesList の index)
+    // voxel 座標 (min = 左上, max = 右下)。第3軸 (slice) は volume box のときのみ意味を持つ。
+    topLeft: [number, number, number];
+    bottomRight: [number, number, number];
+    label?: string;
+}
+
 const ERASE_SENTINEL = 0xFFFF;
 
 const DEFAULT_LABEL_PALETTE: Array<[number, number, number]> = [
@@ -77,6 +89,10 @@ interface State {
 
     sphere: SphereROI | null;
     polygon: PolygonROIState | null;
+
+    // 矩形 ROI のリスト。tool=rectROI のドラッグで追加され、JSON 書き出し対象。
+    rectRois: RectROI[];
+    nextRectRoiId: number;
 
     undoStack: UndoEntry[];
 
@@ -159,6 +175,9 @@ export const useSegmentationStore = defineStore('segmentation', {
 
         sphere: null,
         polygon: null,
+
+        rectRois: [],
+        nextRectRoiId: 1,
 
         undoStack: [],
 
@@ -401,6 +420,43 @@ export const useSegmentationStore = defineStore('segmentation', {
 
         clearSphere() {
             this.sphere = null;
+        },
+
+        // ===== 矩形 ROI =====
+        // voxel 座標の 2 隅を受け取り、min/max に正規化して 1 件追加する。
+        addRectRoi(
+            seriesIndex: number,
+            cornerA: [number, number, number],
+            cornerB: [number, number, number],
+            label?: string,
+        ): RectROI {
+            const topLeft: [number, number, number] = [
+                Math.min(cornerA[0], cornerB[0]),
+                Math.min(cornerA[1], cornerB[1]),
+                Math.min(cornerA[2], cornerB[2]),
+            ];
+            const bottomRight: [number, number, number] = [
+                Math.max(cornerA[0], cornerB[0]),
+                Math.max(cornerA[1], cornerB[1]),
+                Math.max(cornerA[2], cornerB[2]),
+            ];
+            const roi: RectROI = {
+                id: this.nextRectRoiId++,
+                seriesIndex,
+                topLeft,
+                bottomRight,
+                label,
+            };
+            this.rectRois.push(roi);
+            return roi;
+        },
+
+        removeRectRoi(id: number) {
+            this.rectRois = this.rectRois.filter(r => r.id !== id);
+        },
+
+        clearRectRois() {
+            this.rectRois = [];
         },
 
         // Reference sphere (liver / bloodPool) を配置 + 内部 SUV stats 計算

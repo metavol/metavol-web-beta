@@ -35,6 +35,7 @@ import imagebox from "./ImageBox.vue";
 import { ImageBoxInfoBase, DicomSliceImageBoxInfo, VolumeImageBoxInfo, defaultInfo, pushVolume, FusedVolumeImageBoxInfo } from "./DicomImageBoxInfo";
 import { getAllFilesRecursive } from "./DragAndDropUtil";
 import { generateVolumeFromDicom } from './dicom2volume.ts';
+import { readDicomPixels, readDicomPixelsAsInt16, autoWindowFromPixels } from './dicomPixels.ts';
 import * as DecompressJpegLossless from "./decompressJpegLossless";
 import { getSeriesTransferSyntaxInfo } from "./transferSyntax";
 import { isPrimaryForFusion, isRgbSeries } from "./seriesClassify";
@@ -417,6 +418,10 @@ onMounted(() => {
     }
   });
   window.addEventListener('resize', applyAutoFit);
+  // 矩形 ROI ドラッグが box の外で離されても確定できるよう、window でも mouseup を拾う。
+  window.addEventListener('mouseup', () => {
+    if (rectRoiDraft.value) rectRoiMouseUp();
+  });
 });
 
 // Vite dev middleware (vite.config.mts の devSampleDataPlugin) 経由で
@@ -666,14 +671,11 @@ const readDicomSlicePixelAt = (boxId: number, cx: number, cy: number): { value: 
   }
   const pde = ds.elements?.x7fe00010;
   if (!pde) return { value: null, col, row };
-  // pixel data 取得 (decompressed があればそれを使う)
-  const buf = (ds as any).decompressed == null ? ds.byteArray.buffer as ArrayBuffer : (ds as any).decompressed;
-  const offset = (ds as any).decompressed == null ? pde.dataOffset : 0;
-  const length = (ds as any).decompressed == null ? pde.length : buf.byteLength;
+  // pixel data 取得 (BitsAllocated に従って 8/16-bit を読み分け)
   let raw: number;
   try {
-    const i16a = new Int16Array(buf, offset, length / 2);
-    raw = i16a[row * cols + col];
+    const info = readDicomPixels(ds);
+    raw = info.pixels[row * cols + col];
   } catch {
     return { value: null, col, row };
   }
@@ -1945,7 +1947,58 @@ const onTitlebarSaveVolumeNifti = (i: number) => {
   triggerDownload(sidecarBlob, `${baseName}.json`);
 };
 
-type LeftButtonFunction = "window" | "pan" | "zoom" | "page" | "sphereROI" | "polygonROI" | "assignLabel";
+// 画像上に配置した ROI 群を JSON で書き出す。
+// 矩形 ROI は左上 (topLeft) / 右下 (bottomRight) を voxel 座標で表現する (default、world ではない)。
+// sphere ROI が存在すれば参考情報として併記する (sphere は world 座標が本来の保持形式)。
+const exportRoisAsJson = () => {
+  const rects = segStore.rectRois;
+  if (rects.length === 0 && !segStore.sphere) {
+    alert('No ROI to export. Place a Rectangle ROI first.');
+    return;
+  }
+
+  // 矩形 ROI: voxel 座標。series の参考情報 (UID / dims) も付ける。
+  const rectanglesJson = rects.map(r => {
+    const series = seriesList[r.seriesIndex];
+    const vol = series?.volume;
+    const firstDicom = series?.myDicom?.[0];
+    const seriesUID = vol?.metadata?.seriesUID
+      ?? firstDicom?.string('x0020000e')
+      ?? null;
+    return {
+      id: r.id,
+      label: r.label ?? null,
+      coordinateSystem: 'voxel',
+      seriesIndex: r.seriesIndex,
+      seriesUID,
+      topLeft:     { x: r.topLeft[0],     y: r.topLeft[1],     z: r.topLeft[2] },
+      bottomRight: { x: r.bottomRight[0], y: r.bottomRight[1], z: r.bottomRight[2] },
+    };
+  });
+
+  const payload: Record<string, unknown> = {
+    type: 'metavol-roi',
+    version: 1,
+    created: new Date().toISOString(),
+    rectangles: rectanglesJson,
+  };
+
+  // sphere は world 座標で保持しているため、その旨を明記して併記。
+  if (segStore.sphere) {
+    const s = segStore.sphere;
+    payload.sphere = {
+      coordinateSystem: 'world-mm',
+      centerWorld: { x: s.centerWorld.x, y: s.centerWorld.y, z: s.centerWorld.z },
+      radiusMm: s.radiusMm,
+    };
+  }
+
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+  triggerDownload(blob, `metavol-roi_${ts}.json`);
+};
+
+type LeftButtonFunction = "window" | "pan" | "zoom" | "page" | "sphereROI" | "rectROI" | "polygonROI" | "assignLabel";
 // const leftButtonFunction = ref<LeftButtonFunction>("none");
 const leftButtonFunctionChanged = (e: LeftButtonFunction) => {
   leftButtonFunction.value = e;
@@ -2409,6 +2462,10 @@ const applyWindowLevelDrag = (id: number, mvX: number, mvY: number) => {
 // onContextMenu でこのフラグが true なら menu を抑止 (drag 完了で menu 出さない)。
 const rightDragActive = ref(false);
 
+// 矩形 ROI ドラッグ中の一時状態 (screen 座標)。null = ドラッグ中でない。
+// 確定すると segStore.rectRois に voxel 座標で push される。
+const rectRoiDraft = ref<{ boxId: number; x0: number; y0: number; x1: number; y1: number } | null>(null);
+
 const mouseMove = (e: MouseEvent) => {
   const id = getIdOfEventOccured(e);
   const infoV = getVolumeImageBoxInfo;
@@ -2430,6 +2487,17 @@ const mouseMove = (e: MouseEvent) => {
   if ((e.buttons & 2) !== 0){
     rightDragActive.value = true;
     applyWindowLevelDrag(id, e.movementX, e.movementY);
+    return;
+  }
+
+  // 矩形 ROI: 左ボタンドラッグ中なら対角隅を追従。
+  if (leftButtonFunction.value == "rectROI" && rectRoiDraft.value && (e.buttons & 1) !== 0) {
+    if (rectRoiDraft.value.boxId === id) {
+      const [x, y] = getCanvasXY(e);
+      rectRoiDraft.value.x1 = x;
+      rectRoiDraft.value.y1 = y;
+      showImage(id);
+    }
     return;
   }
 
@@ -2601,6 +2669,40 @@ const handleAssignLabelClick = (e: MouseEvent) => {
   const pet = segStore.petVolumeRef;
   if (i < 0 || i >= pet.nx || j < 0 || j >= pet.ny || k < 0 || k >= pet.nz) return;
   segStore.assignLabelAtVoxel(i, j, k, segStore.currentLabelId);
+  show();
+};
+
+// ===== 矩形 ROI ツール =====
+// mousedown でドラッグ開始、mousemove で対角隅を追従、mouseup で確定。
+// 確定時に screen 2 隅 → series voxel 座標へ変換して segStore.rectRois に追加。
+const rectRoiMouseDown = (e: MouseEvent) => {
+  if (leftButtonFunction.value !== "rectROI") return;
+  if (e.button !== 0) return;  // 左ボタンのみ
+  const id = getIdOfEventOccured(e);
+  // DICOM slice / Volume / Fusion box のみ対応 (voxel 変換が定義される box)
+  if (!isDicomSliceImageBoxInfo(id) && !isAnyVolumeBox(id)) return;
+  const [x, y] = getCanvasXY(e);
+  rectRoiDraft.value = { boxId: id, x0: x, y0: y, x1: x, y1: y };
+  selectedImageBoxId.value = id;
+};
+
+const rectRoiMouseUp = () => {
+  const d = rectRoiDraft.value;
+  rectRoiDraft.value = null;
+  if (!d) return;
+  // 面積ゼロ (クリックのみ) は無視
+  if (Math.abs(d.x1 - d.x0) < 2 && Math.abs(d.y1 - d.y0) < 2) {
+    show();
+    return;
+  }
+  const vA = screenToVoxelAny(d.boxId, d.x0, d.y0);
+  const vB = screenToVoxelAny(d.boxId, d.x1, d.y1);
+  const seriesIdx = seriesIndexOfBox(d.boxId);
+  if (!vA || !vB || seriesIdx < 0) {
+    show();
+    return;
+  }
+  segStore.addRectRoi(seriesIdx, vA, vB);
   show();
 };
 
@@ -3609,8 +3711,23 @@ const showImage = (i:number) => {
         const rows = dataSet.int16("x00280010") ?? 512;
         const cols = dataSet.int16("x00280011") ?? 512;
 
-        const wc = imageBoxInfos.value[i].myWC ?? Number(dataSet.string("x00281050", 0) ?? "0");
-        const ww = imageBoxInfos.value[i].myWW ?? Number(dataSet.string("x00281051", 0) ?? "1");
+        // WindowCenter/Width: box の override → DICOM タグ → pixel 値域からの auto-window。
+        // DX や Secondary Capture は WC/WW タグを欠くことが多く、その場合に
+        // ww=1 だと画像がほぼ真っ白になる。タグ欠落時は pixel min/max から窓を作る。
+        const dcmWcStr = dataSet.string("x00281050", 0);
+        const dcmWwStr = dataSet.string("x00281051", 0);
+        let wc: number, ww: number;
+        if (imageBoxInfos.value[i].myWC != null && imageBoxInfos.value[i].myWW != null) {
+          wc = imageBoxInfos.value[i].myWC!;
+          ww = imageBoxInfos.value[i].myWW!;
+        } else if (dcmWcStr != null && dcmWwStr != null && Number(dcmWwStr) > 0) {
+          wc = Number(dcmWcStr);
+          ww = Number(dcmWwStr);
+        } else {
+          const aw = autoWindowFromPixels(dataSet);
+          wc = imageBoxInfos.value[i].myWC ?? aw.wc;
+          ww = imageBoxInfos.value[i].myWW ?? aw.ww;
+        }
 
         const intercept = Number(dataSet.string("x00281052") ?? "0");
         const slope = Number(dataSet.string("x00281053") ?? "1");
@@ -3655,7 +3772,9 @@ const showImage = (i:number) => {
           const ui8a = new Uint8Array(buf, offset, length);
           imb.value![i].showRgb(ui8a, rows!, cols!, centerX, centerY, zoom);
         } else {
-          const i16a = new Int16Array(buf, offset, length / 2);
+          // BitsAllocated に従って 8-bit / 16-bit を読み分ける (DX や Secondary
+          // Capture は 8-bit grayscale で、Int16 固定読みだと画素が壊れる)。
+          const i16a = readDicomPixelsAsInt16(dataSet);
           imb.value![i].show(
             i16a, rows, cols, wc, ww, intercept, slope, centerX, centerY, zoom,
             info.interpolation ?? 'bilinear'
@@ -3799,6 +3918,10 @@ const showImage = (i:number) => {
 };
 
 const drawAnnotationOverlays = (i: number) => {
+  // 矩形 ROI は box 種別を問わず描く (DICOM slice / Volume / Fusion)。
+  drawRectRoiOverlays(i);
+
+  // 球 / polygon は Volume box のみ。
   if (!isVolumeImageBoxInfo(i)) return;
   const a = getVolumeImageBoxInfo(i);
 
@@ -3839,6 +3962,40 @@ const drawAnnotationOverlays = (i: number) => {
   const p = segStore.polygon;
   if (p && p.imageBoxId === i && p.screenVertices.length > 0){
     imb.value![i].drawPolygonOverlay(p.screenVertices, p.mode, !p.inProgress);
+  }
+};
+
+// box i に、確定済み矩形 ROI とドラッグ中 draft を描く。
+// 確定済み矩形は voxel 座標で保持されているので、box の現在の表示に合わせて
+// canvas 座標へ逆投影する。series が一致する box にのみ描画する。
+// DICOM slice box では slice index が一致する矩形のみ。
+const drawRectRoiOverlays = (i: number) => {
+  const isDicomSlice = isDicomSliceImageBoxInfo(i);
+  if (!isDicomSlice && !isAnyVolumeBox(i)) return;
+  const seriesIdx = seriesIndexOfBox(i);
+
+  const rectsToDraw: Array<{ x0: number; y0: number; x1: number; y1: number; label?: string }> = [];
+  for (const r of segStore.rectRois) {
+    if (r.seriesIndex !== seriesIdx) continue;
+    if (isDicomSlice) {
+      // DICOM slice: 矩形が配置されたスライスと現在表示中スライスが一致する場合のみ。
+      const info = imageBoxInfos.value[i] as DicomSliceImageBoxInfo;
+      if (Math.round(r.topLeft[2]) !== info.currentSliceNumber) continue;
+    }
+    const a = voxelToScreenAny(i, r.topLeft[0], r.topLeft[1], r.topLeft[2]);
+    const b = voxelToScreenAny(i, r.bottomRight[0], r.bottomRight[1], r.bottomRight[2]);
+    if (!a || !b) continue;
+    rectsToDraw.push({ x0: a[0], y0: a[1], x1: b[0], y1: b[1], label: r.label });
+  }
+
+  // ドラッグ中 draft はこの box のものだけ screen 座標そのままで描く。
+  const d = rectRoiDraft.value;
+  const draftForBox = (d && d.boxId === i)
+    ? { x0: d.x0, y0: d.y0, x1: d.x1, y1: d.y1 }
+    : null;
+
+  if (rectsToDraw.length > 0 || draftForBox) {
+    imb.value![i].drawRectRoiOverlay(rectsToDraw, draftForBox);
   }
 };
 
@@ -3897,6 +4054,70 @@ const screenToWorldAny = (boxId: number, cx: number, cy: number): THREE.Vector3 
   if (boxId < 0 || boxId >= imageBoxInfos.value.length) return null;
   if (isAnyVolumeBox(boxId)) return screenToWorld(boxId, cx, cy);
   if (isDicomSliceImageBoxInfo(boxId)) return screenToWorldDicomSlice(boxId, cx, cy);
+  return null;
+};
+
+// box が参照している series の index (seriesList の添字) を返す。
+const seriesIndexOfBox = (boxId: number): number => {
+  const info = imageBoxInfos.value[boxId] as { currentSeriesNumber?: number } | undefined;
+  return info?.currentSeriesNumber ?? -1;
+};
+
+// canvas (cx, cy) → 当該 box の series の voxel 座標。
+// DICOM slice box: 表示中スライスの (col, row, sliceNumber)。
+// Volume / Fusion box: 当該 volume の worldToVoxel 結果。
+// 戻り値の第3要素は through-plane の voxel index。
+const screenToVoxelAny = (boxId: number, cx: number, cy: number): [number, number, number] | null => {
+  if (boxId < 0 || boxId >= imageBoxInfos.value.length) return null;
+  if (isDicomSliceImageBoxInfo(boxId)) {
+    const info = imageBoxInfos.value[boxId] as DicomSliceImageBoxInfo;
+    const series = seriesList[info.currentSeriesNumber];
+    const ds = series?.myDicom?.[info.currentSliceNumber];
+    if (!ds) return null;
+    const cols = ds.int16('x00280011') ?? 0;
+    const rows = ds.int16('x00280010') ?? 0;
+    if (!cols || !rows) return null;
+    // screenToWorldDicomSlice / DebugInspector と同じ pixel 変換。
+    const zoom = info.zoom ?? 1;
+    const fx = (cx - imageBoxW.value! / 2) / zoom + cols / 2 + info.centerX;
+    const fy = (cy - imageBoxH.value! / 2) / zoom + rows / 2 + info.centerY;
+    return [fx, fy, info.currentSliceNumber];
+  }
+  if (isAnyVolumeBox(boxId)) {
+    const j = seriesIndexOfBox(boxId);
+    if (j < 0 || !seriesList[j]?.volume) return null;
+    const w = screenToWorld(boxId, cx, cy);
+    const v = worldToVoxel_(w, j);
+    return [v.x, v.y, v.z];
+  }
+  return null;
+};
+
+// 上の逆変換: series voxel 座標 → 当該 box の canvas (cx, cy)。
+// 矩形 ROI overlay を描くために使う。Volume box では through-plane voxel も渡す。
+const voxelToScreenAny = (boxId: number, vx: number, vy: number, vz: number): [number, number] | null => {
+  if (boxId < 0 || boxId >= imageBoxInfos.value.length) return null;
+  if (isDicomSliceImageBoxInfo(boxId)) {
+    const info = imageBoxInfos.value[boxId] as DicomSliceImageBoxInfo;
+    const series = seriesList[info.currentSeriesNumber];
+    const ds = series?.myDicom?.[info.currentSliceNumber];
+    if (!ds) return null;
+    const cols = ds.int16('x00280011') ?? 0;
+    const rows = ds.int16('x00280010') ?? 0;
+    if (!cols || !rows) return null;
+    const zoom = info.zoom ?? 1;
+    const cx = (vx - cols / 2 - info.centerX) * zoom + imageBoxW.value! / 2;
+    const cy = (vy - rows / 2 - info.centerY) * zoom + imageBoxH.value! / 2;
+    return [cx, cy];
+  }
+  if (isAnyVolumeBox(boxId)) {
+    const j = seriesIndexOfBox(boxId);
+    if (j < 0 || !seriesList[j]?.volume) return null;
+    const w = voxelToWorld_(new THREE.Vector3(vx, vy, vz), j);
+    const s = worldToScreen(boxId, w);
+    if (!s) return null;
+    return [s.sx, s.sy];
+  }
   return null;
 };
 
@@ -4088,11 +4309,23 @@ const generateThumbnail = (s: SeriesList, modality: string, sliceIdx?: number): 
       const cols = ds.int16("x00280011") ?? 512;
       const intercept = Number(ds.string("x00281052") ?? "0");
       const slope = Number(ds.string("x00281053") ?? "1");
-      const wc = Number(ds.string("x00281050", 0) ?? defaultWC);
-      const ww = Number(ds.string("x00281051", 0) ?? defaultWW);
       const pde = ds.elements.x7fe00010;
       if (!pde) return null;
       const photo = (ds.string("x00280004") ?? '').toUpperCase();
+      // WC/WW: DICOM タグ → modality default。タグ欠落 (DX 等) は pixel
+      // 値域からの auto-window。defaultWC/WW は 0..255 の DX で暗くなりすぎる。
+      const dcmWc = ds.string("x00281050", 0);
+      const dcmWw = ds.string("x00281051", 0);
+      let wc: number, ww: number;
+      if (dcmWc != null && dcmWw != null && Number(dcmWw) > 0) {
+        wc = Number(dcmWc);
+        ww = Number(dcmWw);
+      } else if (photo === 'RGB') {
+        wc = defaultWC; ww = defaultWW; // RGB は windowing しないので未使用
+      } else {
+        const aw = autoWindowFromPixels(ds);
+        wc = aw.wc; ww = aw.ww;
+      }
 
       // RGB 8bit interleaved: そのまま色をサンプリング (windowing 不要)
       if (photo === 'RGB') {
@@ -4114,17 +4347,14 @@ const generateThumbnail = (s: SeriesList, modality: string, sliceIdx?: number): 
         return cv.toDataURL('image/png');
       }
 
-      // grayscale 16bit (MONOCHROME1/2 含む)
-      // JPEG Lossless: decompressed キャッシュがあればそれを使う、無ければ
-      // サムネ生成は諦める (背景 decompress が完了すれば再 build される)
-      let i16: Int16Array;
-      if (DecompressJpegLossless.check(ds)) {
-        const cached = (ds as MyDicom).decompressed;
-        if (cached == null) return null;
-        i16 = new Int16Array(cached, 0, (cached as ArrayBuffer).byteLength / 2);
-      } else {
-        i16 = new Int16Array(ds.byteArray.buffer, pde.dataOffset, pde.length / 2);
+      // grayscale (MONOCHROME1/2、8/16-bit)
+      // JPEG Lossless: decompressed キャッシュが無ければサムネ生成は諦める
+      // (背景 decompress が完了すれば再 build される)
+      if (DecompressJpegLossless.check(ds) && (ds as MyDicom).decompressed == null) {
+        return null;
       }
+      // BitsAllocated に従って 8/16-bit を読み分ける (Int16 固定だと DX で破損)
+      const i16 = readDicomPixelsAsInt16(ds);
       let ad = 0;
       for (let y = 0; y < TH; y++){
         for (let x = 0; x < TH; x++){
@@ -5171,6 +5401,8 @@ defineExpose({
   resolvePetCtIndices,
   // App-bar の Preprocessing メニューから redraw を呼ぶ用
   redraw: show,
+  // ROI (矩形 / sphere) を JSON 書き出し
+  exportRoisAsJson,
   setupTriplanarPt,
   setupTriplanarFused,
   setupPtOnly4up,
@@ -5316,6 +5548,8 @@ defineExpose({
         @click="imageBoxClicked"
         @mousemove="mouseMove"
         @mouseleave="debugShow = false"
+        @mousedown.left="rectRoiMouseDown"
+        @mouseup.left="rectRoiMouseUp"
         @mousedown.middle.prevent
         @auxclick.prevent
         @contextmenu="onContextMenu"

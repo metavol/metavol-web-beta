@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { Volume } from "./Volume";
 import type { VolumeMetadata, Modality, SuvSource } from "../types/VolumeMetadata";
 import * as DecompressJpegLossless from "./decompressJpegLossless";
+import { readDicomPixels } from "./dicomPixels";
 
 interface MyDataSet extends DataSet {
     decompressed?: ArrayBuffer;
@@ -55,26 +56,36 @@ export const generateVolumeFromDicom = (dcmList: MyDataSet[]) => {
     const suvFactor = suvResult.factor;
 
     const d = dcmList[0];
-    const d1 = dcmList[1];
+    const d1 = dcmList[1]; // 1 スライスのみの場合は undefined
 
     const nx = d.int16("x00280011")!; // columns
     const ny = d.int16("x00280010")!; // rows
     const nz = dcmList.length;
 
-    const vx = new THREE.Vector3(
-        d.floatString("x00200037",0)!, // 	Image Orientation (Patient)
-        d.floatString("x00200037",1)!,
-        d.floatString("x00200037",2)!
-    );
-    const px = d.floatString("x00280030",0)!; // pixel spacing
-    vx.multiplyScalar(px / vx.length());
+    // --- 幾何タグ (PixelSpacing / ImageOrientation / ImagePosition) ---
+    // CT/MR/PET の通常シリーズは全て備える。一方 DX や Secondary Capture などの
+    // 平面画像はこれらを欠くことが多い。欠落時は「軸平行・等方 1mm・原点 0」の
+    // 既定で Volume 化する (1 スライスでも MPR/表示できるようにするため)。
 
-    const vy = new THREE.Vector3(
-        d.floatString("x00200037",3)!, // 	Image Orientation (Patient)
-        d.floatString("x00200037",4)!,
-        d.floatString("x00200037",5)!
-    );
-    const py = d.floatString("x00280030",1)!; // pixel spacing
+    // ImageOrientationPatient (0020,0037): 行/列方向の単位ベクトル。
+    const hasOrient = d.floatString("x00200037", 0) != null;
+    const ox = (k: number) => d.floatString("x00200037", k) ?? 0;
+    const vx = hasOrient
+        ? new THREE.Vector3(ox(0), ox(1), ox(2))
+        : new THREE.Vector3(1, 0, 0); // 列方向 = +X
+    const vy = hasOrient
+        ? new THREE.Vector3(ox(3), ox(4), ox(5))
+        : new THREE.Vector3(0, 1, 0); // 行方向 = +Y
+
+    // PixelSpacing (0028,0030): [row spacing, col spacing] (mm)。
+    // ImagerPixelSpacing (0018,1164) は DX の代替タグ。両方無ければ 1mm。
+    const px = d.floatString("x00280030", 0)
+        ?? d.floatString("x00181164", 0)
+        ?? 1;
+    const py = d.floatString("x00280030", 1)
+        ?? d.floatString("x00181164", 1)
+        ?? 1;
+    vx.multiplyScalar(px / vx.length());
     vy.multiplyScalar(py / vy.length());
 
     // slice locationは、たまに、image positionのz座標と符号が反対のことがある。
@@ -82,20 +93,36 @@ export const generateVolumeFromDicom = (dcmList: MyDataSet[]) => {
     // const sl = d.floatString("x00201041")!; // slice location
     // const sl1 = d1.floatString("x00201041")!; // slice location
 
-    const pos0 = new THREE.Vector3(
-        d.floatString("x00200032",0)!, //	Image Position (Patient)
-        d.floatString("x00200032",1)!,
-        d.floatString("x00200032",2)!
-    );
+    // ImagePositionPatient (0020,0032): 先頭スライスの原点 (mm)。欠落時は 0。
+    const hasPos0 = d.floatString("x00200032", 0) != null;
+    const pos0 = hasPos0
+        ? new THREE.Vector3(
+            d.floatString("x00200032", 0)!,
+            d.floatString("x00200032", 1)!,
+            d.floatString("x00200032", 2)!,
+          )
+        : new THREE.Vector3(0, 0, 0);
 
-    const pos1 = new THREE.Vector3(
-        d1.floatString("x00200032",0)!,
-        d1.floatString("x00200032",1)!,
-        d1.floatString("x00200032",2)!
-    );
-
-    const vz = pos1.clone();
-    vz.sub(pos0);
+    // スライス方向ベクトル vz。
+    //   - 2 スライス以上 + 両方に position あり: pos1 - pos0 (実測の slice pitch)
+    //   - それ以外 (単一スライス / position 欠落): vx × vy の単位ベクトル
+    //     (SliceThickness があればその長さ、無ければ 1mm)
+    let vz: THREE.Vector3;
+    const pos1HasTag = d1 != null && d1.floatString("x00200032", 0) != null;
+    if (d1 != null && hasPos0 && pos1HasTag) {
+        const pos1 = new THREE.Vector3(
+            d1.floatString("x00200032", 0)!,
+            d1.floatString("x00200032", 1)!,
+            d1.floatString("x00200032", 2)!,
+        );
+        vz = pos1.clone().sub(pos0);
+    } else {
+        const thickness = d.floatString("x00180050") ?? 1; // SliceThickness
+        vz = new THREE.Vector3()
+            .crossVectors(vx, vy)
+            .normalize()
+            .multiplyScalar(thickness);
+    }
 
     // let buffer = new ArrayBuffer(nx*ny*nz*4);
     // let dv = new DataView(buffer);
@@ -105,7 +132,6 @@ export const generateVolumeFromDicom = (dcmList: MyDataSet[]) => {
     let ad = 0;
     for (let i = 0; i<nz; i++){
         const dataSet = dcmList[i];
-        const pixelDataElement = dataSet.elements.x7fe00010;
         const intercept = Number(dataSet.string("x00281052") ?? "0");
         const slope = Number(dataSet.string("x00281053") ?? "1");
 
@@ -113,14 +139,9 @@ export const generateVolumeFromDicom = (dcmList: MyDataSet[]) => {
         if (DecompressJpegLossless.check(dataSet) && dataSet.decompressed == null){
             dataSet.decompressed = DecompressJpegLossless.decode(dataSet);
         }
-        const buf = dataSet.decompressed != null
-            ? dataSet.decompressed as ArrayBuffer
-            : dataSet.byteArray.buffer;
-        const offset = dataSet.decompressed != null ? 0 : pixelDataElement.dataOffset;
-        const length = dataSet.decompressed != null
-            ? (dataSet.decompressed as ArrayBuffer).byteLength
-            : pixelDataElement.length;
-        const aaa = new Int16Array(buf, offset, length / 2);
+        // BitsAllocated に従って 8/16-bit を読み分ける。
+        // Int16 固定読みだと 8-bit DX 等で画素数・値が壊れる。
+        const aaa = readDicomPixels(dataSet).pixels;
 
 
         for (let j = 0; j<ny; j++){

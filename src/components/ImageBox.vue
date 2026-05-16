@@ -1415,10 +1415,41 @@ const drawPolygonOverlay = (vertices: Array<[number, number]>, mode: 'add' | 'er
   ctx.restore();
 };
 
+// 矩形 ROI overlay。rects は各矩形の canvas 座標 [x0,y0,x1,y1]、
+// draft は確定前のドラッグ中矩形 (破線で描く)。
+const drawRectRoiOverlay = (
+  rects: Array<{ x0: number; y0: number; x1: number; y1: number; label?: string }>,
+  draft: { x0: number; y0: number; x1: number; y1: number } | null,
+) => {
+  if (cv1.value === null || ctx === null) return;
+  ctx.save();
+  // 確定済み矩形: 実線シアン
+  ctx.strokeStyle = "#00d4aa";
+  ctx.lineWidth = 1.5;
+  ctx.font = "11px 'JetBrains Mono', monospace";
+  ctx.fillStyle = "#00d4aa";
+  for (const r of rects) {
+    const x = Math.min(r.x0, r.x1), y = Math.min(r.y0, r.y1);
+    const w = Math.abs(r.x1 - r.x0), h = Math.abs(r.y1 - r.y0);
+    ctx.setLineDash([]);
+    ctx.strokeRect(x, y, w, h);
+    if (r.label) ctx.fillText(r.label, x + 2, y - 3 < 10 ? y + 12 : y - 3);
+  }
+  // ドラッグ中矩形: 破線イエロー
+  if (draft) {
+    const x = Math.min(draft.x0, draft.x1), y = Math.min(draft.y0, draft.y1);
+    const w = Math.abs(draft.x1 - draft.x0), h = Math.abs(draft.y1 - draft.y0);
+    ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = "#ffd54f";
+    ctx.strokeRect(x, y, w, h);
+  }
+  ctx.restore();
+};
+
 defineExpose({init, show, show2, showRgb, showDirect,
    drawNiftiSlice, drawNiftiSliceFusion, drawNiftiMip, drawNiftiVR,
    drawFusionMip, drawFusionVR, clear,
-   drawSphereOverlay, drawPolygonOverlay,
+   drawSphereOverlay, drawPolygonOverlay, drawRectRoiOverlay,
    // canvas pixel を外部から読む用 (parity test 等)
    cv1});
 
