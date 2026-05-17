@@ -191,6 +191,13 @@
             <v-list-item-title>Export ROIs…</v-list-item-title>
             <v-list-item-subtitle>Download .json with rectangle ROIs (voxel coordinates)</v-list-item-subtitle>
           </v-list-item>
+          <v-list-item @click="onImportRois">
+            <template v-slot:prepend>
+              <v-icon icon="mdi-vector-rectangle" size="small" />
+            </template>
+            <v-list-item-title>Import ROIs…</v-list-item-title>
+            <v-list-item-subtitle>Load a previously exported metavol-roi .json</v-list-item-subtitle>
+          </v-list-item>
         </v-list>
       </v-menu>
       <input
@@ -199,6 +206,13 @@
         accept=".json,application/json"
         style="display: none"
         @change="onSnapshotInputChange"
+      />
+      <input
+        ref="roiImportInput"
+        type="file"
+        accept=".json,application/json"
+        style="display: none"
+        @change="onRoiInputChange"
       />
 
       <v-divider vertical class="mx-3" />
@@ -984,6 +998,20 @@ const onSnapshotInputChange = async (e: Event) => {
   const r = await dicomViewRef.value?.loadSnapshotFile?.(file);
   if (r?.ok) setSnapshotMsg(`Loaded: ${r.info}`);
   else setSnapshotMsg(`Load failed: ${r?.reason ?? 'unknown error'}`);
+};
+
+const roiImportInput = ref<HTMLInputElement | null>(null);
+const onImportRois = () => {
+  roiImportInput.value?.click();
+};
+const onRoiInputChange = async (e: Event) => {
+  const inp = e.target as HTMLInputElement;
+  const file = inp.files?.[0];
+  inp.value = '';
+  if (!file) return;
+  const r = await dicomViewRef.value?.importRoisFromJsonFile?.(file);
+  if (r?.ok) setSnapshotMsg(`ROIs: ${r.info}`);
+  else setSnapshotMsg(`ROI import failed: ${r?.info ?? 'unknown error'}`);
 };
 
 // nii.gz gunzip 進捗 (累計 MB)。最終サイズは gzip 形式上事前取得困難のため進捗 % は出さず

@@ -1633,6 +1633,16 @@ const serializeCurrentViewState = (): SerializedViewState => {
 //     segmentation?: { seriesUID, dims, threshold, thresholdUnit, labels, ... ,
 //                      finalMask_b64?, thresholdMask_b64?, manualEdits_b64? } }
 
+// 矩形 ROI 1 件の JSON 表現 (snapshot / ROI export 共通)。voxel 座標。
+interface RectRoiJson {
+  id: number;
+  label: string | null;
+  seriesIndex: number;
+  seriesUID: string | null;
+  topLeft: { x: number; y: number; z: number };
+  bottomRight: { x: number; y: number; z: number };
+}
+
 interface MetavolSnapshotFile {
   schema: 'metavol-snapshot';
   v: 1;
@@ -1651,6 +1661,8 @@ interface MetavolSnapshotFile {
     thresholdMask_b64?: string;
     manualEdits_b64?: string;
   } | null;
+  // 矩形 ROI は PET volume 非依存 (DX 1 枚画像でも置ける) ため top-level に持つ。
+  rectRois?: RectRoiJson[];
 }
 
 const ab2b64 = (buf: ArrayBuffer | undefined): string | undefined => {
@@ -1697,6 +1709,8 @@ const buildSnapshotJson = (): string => {
     ts: Date.now(),
     view,
     segmentation,
+    // 矩形 ROI は PET 非依存なので segmentation とは別に保存
+    rectRois: segStore.rectRois.map(rectRoiToJson),
   };
   return JSON.stringify(file);
 };
@@ -1740,8 +1754,17 @@ const applySnapshotJson = (jsonText: string): { ok: true; info: string } | { ok:
     if (r.ok) segMsg = ' + segmentation';
     else segMsg = ` (segmentation skipped: ${r.reason})`;
   }
+
+  // 矩形 ROI の復元 (top-level、segmentation 非依存)
+  let rectMsg = '';
+  if (Array.isArray(parsed.rectRois)) {
+    segStore.clearRectRois();
+    const nr = importRectRoisFromJson(parsed.rectRois);
+    if (nr > 0) rectMsg = ` + ${nr} rect ROI(s)`;
+  }
+
   show();
-  return { ok: true, info: `${view.t} box(es) restored${segMsg}` };
+  return { ok: true, info: `${view.t} box(es) restored${segMsg}${rectMsg}` };
 };
 
 // File として download / 受け取り。
@@ -1947,6 +1970,48 @@ const onTitlebarSaveVolumeNifti = (i: number) => {
   triggerDownload(sidecarBlob, `${baseName}.json`);
 };
 
+// 矩形 ROI (store の RectROI) → JSON 表現。voxel 座標。series UID も埋める。
+const rectRoiToJson = (r: import('../stores/segmentation').RectROI): RectRoiJson => {
+  const series = seriesList[r.seriesIndex];
+  const seriesUID = series?.volume?.metadata?.seriesUID
+    ?? series?.myDicom?.[0]?.string('x0020000e')
+    ?? null;
+  return {
+    id: r.id,
+    label: r.label ?? null,
+    seriesIndex: r.seriesIndex,
+    seriesUID,
+    topLeft:     { x: r.topLeft[0],     y: r.topLeft[1],     z: r.topLeft[2] },
+    bottomRight: { x: r.bottomRight[0], y: r.bottomRight[1], z: r.bottomRight[2] },
+  };
+};
+
+// JSON 表現を store の rectRois に復元する。defensive にパースする。
+// 戻り値は復元できた矩形数。
+const importRectRoisFromJson = (arr: unknown): number => {
+  if (!Array.isArray(arr)) return 0;
+  let n = 0;
+  for (const item of arr) {
+    if (!item || typeof item !== 'object') continue;
+    const o = item as Record<string, any>;
+    const tl = o.topLeft, br = o.bottomRight;
+    if (!tl || !br) continue;
+    const num = (v: any) => (typeof v === 'number' && isFinite(v) ? v : null);
+    const a: [number, number, number] | null =
+      num(tl.x) != null && num(tl.y) != null && num(tl.z) != null
+        ? [tl.x, tl.y, tl.z] : null;
+    const b: [number, number, number] | null =
+      num(br.x) != null && num(br.y) != null && num(br.z) != null
+        ? [br.x, br.y, br.z] : null;
+    if (!a || !b) continue;
+    const seriesIndex = typeof o.seriesIndex === 'number' ? o.seriesIndex : 0;
+    const label = typeof o.label === 'string' && o.label.length > 0 ? o.label : undefined;
+    segStore.addRectRoi(seriesIndex, a, b, label);
+    n++;
+  }
+  return n;
+};
+
 // 画像上に配置した ROI 群を JSON で書き出す。
 // 矩形 ROI は左上 (topLeft) / 右下 (bottomRight) を voxel 座標で表現する (default、world ではない)。
 // sphere ROI が存在すれば参考情報として併記する (sphere は world 座標が本来の保持形式)。
@@ -1957,30 +2022,12 @@ const exportRoisAsJson = () => {
     return;
   }
 
-  // 矩形 ROI: voxel 座標。series の参考情報 (UID / dims) も付ける。
-  const rectanglesJson = rects.map(r => {
-    const series = seriesList[r.seriesIndex];
-    const vol = series?.volume;
-    const firstDicom = series?.myDicom?.[0];
-    const seriesUID = vol?.metadata?.seriesUID
-      ?? firstDicom?.string('x0020000e')
-      ?? null;
-    return {
-      id: r.id,
-      label: r.label ?? null,
-      coordinateSystem: 'voxel',
-      seriesIndex: r.seriesIndex,
-      seriesUID,
-      topLeft:     { x: r.topLeft[0],     y: r.topLeft[1],     z: r.topLeft[2] },
-      bottomRight: { x: r.bottomRight[0], y: r.bottomRight[1], z: r.bottomRight[2] },
-    };
-  });
-
   const payload: Record<string, unknown> = {
     type: 'metavol-roi',
     version: 1,
     created: new Date().toISOString(),
-    rectangles: rectanglesJson,
+    coordinateSystem: 'voxel',
+    rectangles: rects.map(rectRoiToJson),
   };
 
   // sphere は world 座標で保持しているため、その旨を明記して併記。
@@ -1996,6 +2043,24 @@ const exportRoisAsJson = () => {
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
   triggerDownload(blob, `metavol-roi_${ts}.json`);
+};
+
+// metavol-roi JSON を読み込んで矩形 ROI を復元する (round-trip)。
+// 既存の矩形はクリアしてから読み込む (重複を避ける)。
+const importRoisFromJsonFile = async (file: File): Promise<{ ok: boolean; info: string }> => {
+  let parsed: any;
+  try {
+    parsed = JSON.parse(await file.text());
+  } catch (e) {
+    return { ok: false, info: 'Invalid JSON: ' + ((e as Error)?.message ?? e) };
+  }
+  if (!parsed || parsed.type !== 'metavol-roi') {
+    return { ok: false, info: 'Not a metavol-roi file.' };
+  }
+  segStore.clearRectRois();
+  const n = importRectRoisFromJson(parsed.rectangles);
+  show();
+  return { ok: true, info: `${n} rectangle ROI(s) imported` };
 };
 
 type LeftButtonFunction = "window" | "pan" | "zoom" | "page" | "sphereROI" | "rectROI" | "polygonROI" | "assignLabel";
@@ -2702,7 +2767,14 @@ const rectRoiMouseUp = () => {
     show();
     return;
   }
-  segStore.addRectRoi(seriesIdx, vA, vB);
+  // bounding box label を入力。空欄なら自動連番ラベルを付ける。
+  const defaultLabel = `ROI ${segStore.nextRectRoiId}`;
+  const input = window.prompt('Rectangle ROI label:', defaultLabel);
+  // Cancel (null) でも矩形自体は作る。空文字なら default を採用。
+  const label = input == null
+    ? defaultLabel
+    : (input.trim().length > 0 ? input.trim() : defaultLabel);
+  segStore.addRectRoi(seriesIdx, vA, vB, label);
   show();
 };
 
@@ -5401,8 +5473,9 @@ defineExpose({
   resolvePetCtIndices,
   // App-bar の Preprocessing メニューから redraw を呼ぶ用
   redraw: show,
-  // ROI (矩形 / sphere) を JSON 書き出し
+  // ROI (矩形 / sphere) を JSON 書き出し / 読み込み
   exportRoisAsJson,
+  importRoisFromJsonFile,
   setupTriplanarPt,
   setupTriplanarFused,
   setupPtOnly4up,

@@ -226,6 +226,24 @@ const onRemoveLabel = (id: number) => {
     emit('redraw');
 };
 
+// 矩形 ROI のラベルをリネーム (bounding box label の編集)
+const onRenameRectRoi = (id: number) => {
+    const roi = store.rectRois.find(r => r.id === id);
+    if (!roi) return;
+    const input = window.prompt('Rectangle ROI label:', roi.label ?? `ROI ${roi.id}`);
+    if (input == null) return;  // Cancel
+    const name = input.trim();
+    roi.label = name.length > 0 ? name : undefined;
+    emit('redraw');
+};
+
+// 矩形 ROI の範囲を voxel 座標でツールチップ表示する文字列
+const rectExtent = (r: { topLeft: [number, number, number]; bottomRight: [number, number, number] }): string => {
+    const f = (v: number) => v.toFixed(0);
+    return `voxel [${f(r.topLeft[0])}, ${f(r.topLeft[1])}, ${f(r.topLeft[2])}] – `
+        + `[${f(r.bottomRight[0])}, ${f(r.bottomRight[1])}, ${f(r.bottomRight[2])}]`;
+};
+
 const onToggleOverlay = (val: boolean) => {
     store.overlayEnabled = val;
     emit('redraw');
@@ -1151,6 +1169,48 @@ const polygonModeProxy = computed({
                 </div>
             </section>
 
+            <!-- Rectangle ROI -->
+            <section class="mv-section">
+                <div class="mv-section-title">
+                    <v-icon icon="mdi-rectangle-outline" size="x-small" />
+                    Rectangle ROI
+                    <span v-if="store.rectRois.length" class="mv-section-count">{{ store.rectRois.length }}</span>
+                </div>
+                <div v-if="store.rectRois.length" class="mv-rect-list">
+                    <div
+                        v-for="r in store.rectRois"
+                        :key="r.id"
+                        class="mv-rect-item"
+                    >
+                        <span class="mv-color-swatch" style="background: #00d4aa" />
+                        <span class="mv-rect-name" :title="rectExtent(r)">{{ r.label ?? ('ROI ' + r.id) }}</span>
+                        <v-btn
+                            icon="mdi-pencil"
+                            size="x-small"
+                            variant="text"
+                            density="compact"
+                            title="Rename"
+                            @click="onRenameRectRoi(r.id)"
+                        />
+                        <v-btn
+                            icon="mdi-close"
+                            size="x-small"
+                            variant="text"
+                            density="compact"
+                            title="Delete"
+                            @click="store.removeRectRoi(r.id); emit('redraw')"
+                        />
+                    </div>
+                    <v-btn size="x-small" variant="text" class="mt-1" @click="store.clearRectRois(); emit('redraw')">
+                        <v-icon icon="mdi-close" size="x-small" class="mr-1" />Clear all
+                    </v-btn>
+                </div>
+                <div v-else class="mv-hint">
+                    Select the Rectangle ROI tool, then drag a diagonal on any box.<br>
+                    <span class="mv-hint-grid">Coordinates are stored as voxel indices; export via Snapshot ▸ Export ROIs.</span>
+                </div>
+            </section>
+
             <!-- Labels -->
             <section class="mv-section">
                 <div class="mv-section-title">
@@ -1756,6 +1816,36 @@ const polygonModeProxy = computed({
     white-space: nowrap;
 }
 .mv-label-vol {
+    color: var(--mv-text-dim);
+}
+
+/* Rectangle ROI list — label list と同じ見た目 */
+.mv-rect-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.mv-rect-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+}
+.mv-rect-item:hover {
+    background: var(--mv-surface-2);
+}
+.mv-rect-name {
+    flex: 1;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.mv-section-count {
+    margin-left: 4px;
+    font-size: 11px;
     color: var(--mv-text-dim);
 }
 
