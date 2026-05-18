@@ -35,6 +35,16 @@ export interface UndoEntry {
     before: Uint16Array;
 }
 
+// 統合 undo: ROI 操作とマスク編集を 1 本のスタックで時系列管理する。
+// Ctrl+Z / Undo ボタンはこのスタックを pop して直前操作を巻き戻す。
+//   - maskSlice : polygon add/erase。manualEdits の 1 スライス分の before 状態
+//   - rectAdd   : 矩形 ROI 追加。undo で当該 ROI を削除する
+//   - rectRemove: 矩形 ROI 削除。undo で当該 ROI を復元する
+export type UndoAction =
+    | { kind: 'maskSlice'; sliceAxis: 0 | 1 | 2; sliceIndex: number; before: Uint16Array }
+    | { kind: 'rectAdd'; roiId: number }
+    | { kind: 'rectRemove'; roi: RectROI };
+
 // 矩形 ROI。ドラッグした対角線の 2 隅を voxel 座標で保持する。
 // topLeft / bottomRight は当該 series の voxel index 空間 (= ワールド座標ではない)。
 // volume box 上で配置した場合は through-plane の voxel index も保持する。
@@ -95,6 +105,8 @@ interface State {
     nextRectRoiId: number;
 
     undoStack: UndoEntry[];
+    // 統合 undo スタック (ROI 操作 + マスク編集を時系列で 1 本に)
+    undoLog: UndoAction[];
 
     overlayAlpha: number;
     overlayEnabled: boolean;
@@ -180,6 +192,7 @@ export const useSegmentationStore = defineStore('segmentation', {
         nextRectRoiId: 1,
 
         undoStack: [],
+        undoLog: [],
 
         overlayAlpha: 0.4,
         overlayEnabled: true,
@@ -221,6 +234,10 @@ export const useSegmentationStore = defineStore('segmentation', {
     getters: {
         hasPet(state): boolean {
             return state.petVolumeRef != null;
+        },
+        // 統合 undo スタックに巻き戻せる操作があるか (Undo ボタン / Ctrl+Z の活性判定)
+        canUndo(state): boolean {
+            return state.undoLog.length > 0;
         },
         labelById: (state) => (id: number): LabelEntry | undefined => {
             return state.labels.find(l => l.id === id);
@@ -267,7 +284,7 @@ export const useSegmentationStore = defineStore('segmentation', {
                 this.thresholdMask = null;
                 this.manualEdits = null;
                 this.finalMask = null;
-                this.undoStack = [];
+                this.clearMaskUndo();
                 this.sphere = null;
                 this.polygon = null;
                 this.invalidateComponentMap();
@@ -375,7 +392,7 @@ export const useSegmentationStore = defineStore('segmentation', {
 
         clearManualEdits() {
             if (this.manualEdits) this.manualEdits.fill(0);
-            this.undoStack = [];
+            this.clearMaskUndo();
             this.recomputeFinalMask();
             this.invalidateComponentMap();
         },
@@ -383,6 +400,42 @@ export const useSegmentationStore = defineStore('segmentation', {
         // Polygon 確定後など外部から手動編集が入った直後に呼ぶ
         markManualEditsChanged() {
             this.invalidateComponentMap();
+        },
+
+        // ===== 統合 Undo =====
+        // マスクが置き換わったとき: マスク編集の undo は無効化するが、矩形 ROI の
+        // undo 履歴 (rectAdd / rectRemove) は独立なので残す。
+        clearMaskUndo() {
+            this.undoStack = [];
+            this.undoLog = this.undoLog.filter(a => a.kind !== 'maskSlice');
+        },
+
+        // polygon add/erase 確定前に呼ぶ。manualEdits の 1 スライス分 before を記録。
+        pushMaskSliceUndo(sliceAxis: 0 | 1 | 2, sliceIndex: number, before: Uint16Array) {
+            const entry: UndoEntry = { sliceAxis, sliceIndex, before };
+            this.undoStack.push(entry);
+            if (this.undoStack.length > 50) this.undoStack.shift();
+            this.undoLog.push({ kind: 'maskSlice', sliceAxis, sliceIndex, before });
+            if (this.undoLog.length > 100) this.undoLog.shift();
+        },
+
+        // 直前操作を 1 つ巻き戻す。戻り値はどの種別を undo したか (null = 履歴なし)。
+        // maskSlice の実際のスライス復元は呼び出し側 (DicomView) が担当する
+        // (PET grid 上の voxel index 計算を持っているため)。ここでは履歴管理のみ。
+        undo(): UndoAction | null {
+            const action = this.undoLog.pop();
+            if (!action) return null;
+            if (action.kind === 'rectAdd') {
+                // 追加を取り消す = その ROI を消す
+                this.rectRois = this.rectRois.filter(r => r.id !== action.roiId);
+            } else if (action.kind === 'rectRemove') {
+                // 削除を取り消す = その ROI を復元 (id 含めそのまま戻す)
+                this.rectRois.push(action.roi);
+            } else if (action.kind === 'maskSlice') {
+                // undoStack 側の対応エントリも 1 つ取り除いて整合させる
+                this.undoStack.pop();
+            }
+            return action;
         },
 
         addLabel(name: string): LabelEntry {
@@ -424,11 +477,13 @@ export const useSegmentationStore = defineStore('segmentation', {
 
         // ===== 矩形 ROI =====
         // voxel 座標の 2 隅を受け取り、min/max に正規化して 1 件追加する。
+        // recordUndo=false のとき undo 履歴を積まない (JSON import / snapshot 復元用)。
         addRectRoi(
             seriesIndex: number,
             cornerA: [number, number, number],
             cornerB: [number, number, number],
             label?: string,
+            recordUndo: boolean = true,
         ): RectROI {
             const topLeft: [number, number, number] = [
                 Math.min(cornerA[0], cornerB[0]),
@@ -448,15 +503,29 @@ export const useSegmentationStore = defineStore('segmentation', {
                 label,
             };
             this.rectRois.push(roi);
+            if (recordUndo) {
+                this.undoLog.push({ kind: 'rectAdd', roiId: roi.id });
+                if (this.undoLog.length > 100) this.undoLog.shift();
+            }
             return roi;
         },
 
         removeRectRoi(id: number) {
+            const roi = this.rectRois.find(r => r.id === id);
+            if (!roi) return;
             this.rectRois = this.rectRois.filter(r => r.id !== id);
+            // 削除を undo できるよう ROI 実体を保持
+            this.undoLog.push({ kind: 'rectRemove', roi });
+            if (this.undoLog.length > 100) this.undoLog.shift();
         },
 
+        // 全削除。undo 履歴からも矩形 ROI 関連エントリを除去する
+        // (履歴に残しても復元先の整合が取れないため)。
         clearRectRois() {
             this.rectRois = [];
+            this.undoLog = this.undoLog.filter(
+                a => a.kind !== 'rectAdd' && a.kind !== 'rectRemove',
+            );
         },
 
         // Reference sphere (liver / bloodPool) を配置 + 内部 SUV stats 計算
@@ -561,7 +630,7 @@ export const useSegmentationStore = defineStore('segmentation', {
                 if (this.thresholdMask) this.thresholdMask.fill(0);
                 if (this.manualEdits) this.manualEdits.fill(0);
                 if (this.finalMask) this.finalMask.fill(0);
-                this.undoStack = [];
+                this.clearMaskUndo();
                 this.invalidateComponentMap();
                 this.maskVersion++;
             }
@@ -662,7 +731,7 @@ export const useSegmentationStore = defineStore('segmentation', {
                     suvMax: 0, suvMean: 0, suvStd: 0, voxelCount: 0,
                 };
             }
-            this.undoStack = [];
+            this.clearMaskUndo();
             this.invalidateComponentMap();
             this.maskVersion++;
             this.lastAutoSavedAt = payload.savedAt;
@@ -788,7 +857,7 @@ export const useSegmentationStore = defineStore('segmentation', {
             const tm = this.thresholdMask!;
             me.set(mask);
             tm.fill(0);
-            this.undoStack = [];
+            this.clearMaskUndo();
             this.recomputeFinalMask();
             this.invalidateComponentMap();
             this.maskVersion++;

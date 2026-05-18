@@ -2006,7 +2006,8 @@ const importRectRoisFromJson = (arr: unknown): number => {
     if (!a || !b) continue;
     const seriesIndex = typeof o.seriesIndex === 'number' ? o.seriesIndex : 0;
     const label = typeof o.label === 'string' && o.label.length > 0 ? o.label : undefined;
-    segStore.addRectRoi(seriesIndex, a, b, label);
+    // recordUndo=false: 一括 import を 1 件ずつ undo できてしまうのを防ぐ
+    segStore.addRectRoi(seriesIndex, a, b, label, false);
     n++;
   }
   return n;
@@ -2767,13 +2768,9 @@ const rectRoiMouseUp = () => {
     show();
     return;
   }
-  // bounding box label を入力。空欄なら自動連番ラベルを付ける。
-  const defaultLabel = `ROI ${segStore.nextRectRoiId}`;
-  const input = window.prompt('Rectangle ROI label:', defaultLabel);
-  // Cancel (null) でも矩形自体は作る。空文字なら default を採用。
-  const label = input == null
-    ? defaultLabel
-    : (input.trim().length > 0 ? input.trim() : defaultLabel);
+  // 配置直後は自動連番ラベル (ROI 1, 2, 3, …) を付ける。
+  // prompt は出さない — リネームは右パネルの ✏️ から行う。
+  const label = `ROI ${segStore.nextRectRoiId}`;
   segStore.addRectRoi(seriesIdx, vA, vB, label);
   show();
 };
@@ -2906,14 +2903,12 @@ const saveSliceToUndoStack = (sliceAxis: 0|1|2, sliceIndex: number) => {
       before[k++] = m[idx];
     }
   }
-  segStore.undoStack.push({ sliceAxis, sliceIndex, before });
-  // limit stack to last 50
-  if (segStore.undoStack.length > 50) segStore.undoStack.shift();
+  // 統合 undo スタックへ記録 (undoStack と undoLog の両方を更新)
+  segStore.pushMaskSliceUndo(sliceAxis, sliceIndex, before);
 };
 
-const polygonUndo = () => {
-  const e = segStore.undoStack.pop();
-  if (!e) return;
+// maskSlice undo: manualEdits の 1 スライス分を before 状態に巻き戻す。
+const applyMaskSliceUndo = (e: { sliceAxis: 0|1|2; sliceIndex: number; before: Uint16Array }) => {
   const m = segStore.manualEdits;
   const pet = segStore.petVolumeRef;
   if (!m || !pet) return;
@@ -2934,6 +2929,17 @@ const polygonUndo = () => {
   }
   segStore.recomputeFinalMask();
   segStore.markManualEditsChanged();
+};
+
+// 統合 Undo: 直前操作 (矩形 ROI 追加/削除 or polygon マスク編集) を巻き戻す。
+// Undo ボタン / Ctrl+Z 共通のエントリポイント。
+const undoLastAction = () => {
+  const action = segStore.undo();
+  if (!action) return;
+  if (action.kind === 'maskSlice') {
+    applyMaskSliceUndo(action);
+  }
+  // rectAdd / rectRemove は store.undo() 内で rectRois を更新済み。再描画のみ。
   show();
 };
 
@@ -2966,7 +2972,8 @@ const onKeyDown = (e: KeyboardEvent) => {
     cancelPolygon();
   } else if ((e.key === "z" || e.key === "Z") && (e.ctrlKey || e.metaKey)){
     e.preventDefault();
-    polygonUndo();
+    // 統合 undo: 矩形 ROI 追加/削除 と polygon 編集をまとめて時系列で巻き戻す
+    undoLastAction();
   }
 };
 
@@ -5476,6 +5483,8 @@ defineExpose({
   // ROI (矩形 / sphere) を JSON 書き出し / 読み込み
   exportRoisAsJson,
   importRoisFromJsonFile,
+  // 統合 Undo (App-bar の Undo ボタン用)
+  undoLastAction,
   setupTriplanarPt,
   setupTriplanarFused,
   setupPtOnly4up,

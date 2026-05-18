@@ -232,6 +232,20 @@
         </v-btn>
       </div>
 
+      <v-divider vertical class="mx-3" />
+
+      <!-- Undo: 矩形 ROI 追加/削除 + polygon マスク編集を時系列で巻き戻す (Ctrl+Z) -->
+      <v-btn
+        class="mv-tool-btn"
+        variant="text"
+        size="small"
+        :disabled="!canUndo"
+        @click="onUndo"
+      >
+        <v-icon icon="mdi-undo" />
+        <v-tooltip activator="parent" location="bottom">Undo (Ctrl+Z)</v-tooltip>
+      </v-btn>
+
       <v-spacer />
 
       <!-- JPEG Lossless decompress progress (★2) -->
@@ -755,8 +769,8 @@ const petCtReady = computed(() => {
 });
 
 const drawerLeft = ref(true);
-// Inspector (右ドロワ) は初期非表示 — segmentation 開始時にユーザが ☰ 横の inspector トグルで開く
-const drawerRight = ref(false);
+// Inspector (右ドロワ) は初期表示 — ROI リスト等をすぐ見せる
+const drawerRight = ref(true);
 const leftButtonFunction = ref<string | null>(null);
 const [w, h] = getWH();
 const imageBoxW = ref(w);
@@ -989,6 +1003,12 @@ const onExportRois = () => {
   } catch (err: any) {
     setSnapshotMsg('ROI export failed: ' + (err?.message ?? err));
   }
+};
+
+// 統合 Undo (矩形 ROI 追加/削除 + polygon マスク編集)。Ctrl+Z と同じ動作。
+const canUndo = computed(() => segStore.canUndo);
+const onUndo = () => {
+  dicomViewRef.value?.undoLastAction?.();
 };
 const onSnapshotInputChange = async (e: Event) => {
   const inp = e.target as HTMLInputElement;

@@ -847,9 +847,52 @@ const polygonModeProxy = computed({
 
 <template>
     <div class="mv-seg-panel">
+        <!-- Rectangle ROI: PET volume 非依存。2D (DICOM slice) box でも使えるため
+             petAvailable ゲートの外に置き、常に表示する。 -->
+        <section class="mv-section">
+            <div class="mv-section-title">
+                <v-icon icon="mdi-rectangle-outline" size="x-small" />
+                Rectangle ROI
+                <span v-if="store.rectRois.length" class="mv-section-count">{{ store.rectRois.length }}</span>
+            </div>
+            <div v-if="store.rectRois.length" class="mv-rect-list">
+                <div
+                    v-for="r in store.rectRois"
+                    :key="r.id"
+                    class="mv-rect-item"
+                >
+                    <span class="mv-color-swatch" style="background: #00d4aa" />
+                    <span class="mv-rect-name" :title="rectExtent(r)">{{ r.label ?? ('ROI ' + r.id) }}</span>
+                    <v-btn
+                        icon="mdi-pencil"
+                        size="x-small"
+                        variant="text"
+                        density="compact"
+                        title="Rename"
+                        @click="onRenameRectRoi(r.id)"
+                    />
+                    <v-btn
+                        icon="mdi-close"
+                        size="x-small"
+                        variant="text"
+                        density="compact"
+                        title="Delete"
+                        @click="store.removeRectRoi(r.id); emit('redraw')"
+                    />
+                </div>
+                <v-btn size="x-small" variant="text" class="mt-1" @click="store.clearRectRois(); emit('redraw')">
+                    <v-icon icon="mdi-close" size="x-small" class="mr-1" />Clear all
+                </v-btn>
+            </div>
+            <div v-else class="mv-hint">
+                Select the Rectangle ROI tool, then drag a diagonal on any box (works in 2D view too).<br>
+                <span class="mv-hint-grid">Coordinates are stored as voxel indices; export via Snapshot ▸ Export ROIs.</span>
+            </div>
+        </section>
+
         <div v-if="!petAvailable" class="mv-empty">
             <v-icon icon="mdi-information-outline" size="small" class="mr-1" />
-            Load a PET volume and switch to MPR / Fusion view
+            Load a PET volume and switch to MPR / Fusion view for segmentation tools
         </div>
 
         <template v-else>
@@ -1166,48 +1209,6 @@ const polygonModeProxy = computed({
                     Left click = vertex / Right click or double click = finish<br>
                     Esc = cancel / Ctrl+Z = undo<br>
                     <span class="mv-hint-grid">Paint on any registered Volume box (PT/CT/MR/Fusion) — mask is stored on the PET grid.</span>
-                </div>
-            </section>
-
-            <!-- Rectangle ROI -->
-            <section class="mv-section">
-                <div class="mv-section-title">
-                    <v-icon icon="mdi-rectangle-outline" size="x-small" />
-                    Rectangle ROI
-                    <span v-if="store.rectRois.length" class="mv-section-count">{{ store.rectRois.length }}</span>
-                </div>
-                <div v-if="store.rectRois.length" class="mv-rect-list">
-                    <div
-                        v-for="r in store.rectRois"
-                        :key="r.id"
-                        class="mv-rect-item"
-                    >
-                        <span class="mv-color-swatch" style="background: #00d4aa" />
-                        <span class="mv-rect-name" :title="rectExtent(r)">{{ r.label ?? ('ROI ' + r.id) }}</span>
-                        <v-btn
-                            icon="mdi-pencil"
-                            size="x-small"
-                            variant="text"
-                            density="compact"
-                            title="Rename"
-                            @click="onRenameRectRoi(r.id)"
-                        />
-                        <v-btn
-                            icon="mdi-close"
-                            size="x-small"
-                            variant="text"
-                            density="compact"
-                            title="Delete"
-                            @click="store.removeRectRoi(r.id); emit('redraw')"
-                        />
-                    </div>
-                    <v-btn size="x-small" variant="text" class="mt-1" @click="store.clearRectRois(); emit('redraw')">
-                        <v-icon icon="mdi-close" size="x-small" class="mr-1" />Clear all
-                    </v-btn>
-                </div>
-                <div v-else class="mv-hint">
-                    Select the Rectangle ROI tool, then drag a diagonal on any box.<br>
-                    <span class="mv-hint-grid">Coordinates are stored as voxel indices; export via Snapshot ▸ Export ROIs.</span>
                 </div>
             </section>
 
