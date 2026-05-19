@@ -49,11 +49,14 @@ export type UndoAction =
 // topLeft / bottomRight は当該 series の voxel index 空間 (= ワールド座標ではない)。
 // volume box 上で配置した場合は through-plane の voxel index も保持する。
 export interface RectROI {
-    id: number;
+    id: number;                   // 安定識別子 (単調増加、削除・並べ替えに不変)。表示番号とは別物
     seriesIndex: number;          // どの series の voxel 空間か (seriesList の index)
     // voxel 座標 (min = 左上, max = 右下)。第3軸 (slice) は volume box のときのみ意味を持つ。
     topLeft: [number, number, number];
     bottomRight: [number, number, number];
+    // ユーザがリネームで明示的に付けた名前。未命名なら undefined。
+    // 表示名は label があればそれ、無ければ rectRois 配列内の位置から `#(index+1)` を算出する
+    // (= rectRoiDisplayName getter)。
     label?: string;
 }
 
@@ -241,6 +244,13 @@ export const useSegmentationStore = defineStore('segmentation', {
         },
         labelById: (state) => (id: number): LabelEntry | undefined => {
             return state.labels.find(l => l.id === id);
+        },
+        // 矩形 ROI の表示名: ユーザ命名 (label) があればそれ、無ければ配列位置から `#N`。
+        // 一覧パネル・リネーム既定値・canvas overlay の 3 箇所で同一ルールを使うため getter 化。
+        rectRoiDisplayName: (state) => (index: number): string => {
+            const r = state.rectRois[index];
+            if (!r) return '';
+            return (r.label && r.label.length > 0) ? r.label : `#${index + 1}`;
         },
         petVoxelVolumeMm3(state): number {
             const v = state.petVolumeRef;
@@ -517,6 +527,18 @@ export const useSegmentationStore = defineStore('segmentation', {
             // 削除を undo できるよう ROI 実体を保持
             this.undoLog.push({ kind: 'rectRemove', roi });
             if (this.undoLog.length > 100) this.undoLog.shift();
+        },
+
+        // 矩形 ROI を配列内で fromIndex → toIndex に移動 (一覧の並べ替え)。
+        // 配列順がそのまま表示順・表示番号・overlay 描画順なので、splice で順序を変えるだけ。
+        // undo 対象外 (要求外。index ベースで delete と相性が悪いため意図的に非対応)。
+        reorderRectRoi(fromIndex: number, toIndex: number) {
+            const n = this.rectRois.length;
+            if (fromIndex < 0 || fromIndex >= n) return;
+            if (toIndex < 0 || toIndex >= n) return;
+            if (fromIndex === toIndex) return;
+            const [moved] = this.rectRois.splice(fromIndex, 1);
+            this.rectRois.splice(toIndex, 0, moved);
         },
 
         // 全削除。undo 履歴からも矩形 ROI 関連エントリを除去する

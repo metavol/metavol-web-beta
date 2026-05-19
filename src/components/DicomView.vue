@@ -2768,10 +2768,9 @@ const rectRoiMouseUp = () => {
     show();
     return;
   }
-  // 配置直後は自動連番ラベル (ROI 1, 2, 3, …) を付ける。
-  // prompt は出さない — リネームは右パネルの ✏️ から行う。
-  const label = `ROI ${segStore.nextRectRoiId}`;
-  segStore.addRectRoi(seriesIdx, vA, vB, label);
+  // 配置直後は未命名 (label なし)。表示名は配列位置から `#N` が自動で算出される。
+  // リネームは右パネルの ✏️ から行う。
+  segStore.addRectRoi(seriesIdx, vA, vB);
   show();
 };
 
@@ -4054,7 +4053,10 @@ const drawRectRoiOverlays = (i: number) => {
   const seriesIdx = seriesIndexOfBox(i);
 
   const rectsToDraw: Array<{ x0: number; y0: number; x1: number; y1: number; label?: string }> = [];
-  for (const r of segStore.rectRois) {
+  // 番号は rectRois 全配列のインデックスを使う (= 一覧パネルの表示番号と一致させるため)。
+  // box ごとの series/slice フィルタ後の部分インデックスにしてはいけない。
+  for (let idx = 0; idx < segStore.rectRois.length; idx++) {
+    const r = segStore.rectRois[idx];
     if (r.seriesIndex !== seriesIdx) continue;
     if (isDicomSlice) {
       // DICOM slice: 矩形が配置されたスライスと現在表示中スライスが一致する場合のみ。
@@ -4064,7 +4066,10 @@ const drawRectRoiOverlays = (i: number) => {
     const a = voxelToScreenAny(i, r.topLeft[0], r.topLeft[1], r.topLeft[2]);
     const b = voxelToScreenAny(i, r.bottomRight[0], r.bottomRight[1], r.bottomRight[2]);
     if (!a || !b) continue;
-    rectsToDraw.push({ x0: a[0], y0: a[1], x1: b[0], y1: b[1], label: r.label });
+    rectsToDraw.push({
+      x0: a[0], y0: a[1], x1: b[0], y1: b[1],
+      label: segStore.rectRoiDisplayName(idx),
+    });
   }
 
   // ドラッグ中 draft はこの box のものだけ screen 座標そのままで描く。

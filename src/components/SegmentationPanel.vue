@@ -226,11 +226,11 @@ const onRemoveLabel = (id: number) => {
     emit('redraw');
 };
 
-// 矩形 ROI のラベルをリネーム (bounding box label の編集)
-const onRenameRectRoi = (id: number) => {
-    const roi = store.rectRois.find(r => r.id === id);
+// 矩形 ROI のラベルをリネーム (index 指定)。空文字入力で未命名 (#N 表示) に戻す。
+const onRenameRectRoi = (index: number) => {
+    const roi = store.rectRois[index];
     if (!roi) return;
-    const input = window.prompt('Rectangle ROI label:', roi.label ?? `ROI ${roi.id}`);
+    const input = window.prompt('Rectangle ROI label:', store.rectRoiDisplayName(index));
     if (input == null) return;  // Cancel
     const name = input.trim();
     roi.label = name.length > 0 ? name : undefined;
@@ -242,6 +242,27 @@ const rectExtent = (r: { topLeft: [number, number, number]; bottomRight: [number
     const f = (v: number) => v.toFixed(0);
     return `voxel [${f(r.topLeft[0])}, ${f(r.topLeft[1])}, ${f(r.topLeft[2])}] – `
         + `[${f(r.bottomRight[0])}, ${f(r.bottomRight[1])}, ${f(r.bottomRight[2])}]`;
+};
+
+// ===== 矩形 ROI 一覧のドラッグ&ドロップ並べ替え =====
+const dragRectIndex = ref<number | null>(null);
+const onRectDragStart = (index: number, e: DragEvent) => {
+    dragRectIndex.value = index;
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+};
+const onRectDragOver = (e: DragEvent) => {
+    e.preventDefault();  // drop を許可するために必須
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+};
+const onRectDrop = (index: number) => {
+    const from = dragRectIndex.value;
+    dragRectIndex.value = null;
+    if (from == null || from === index) return;
+    store.reorderRectRoi(from, index);
+    emit('redraw');
+};
+const onRectDragEnd = () => {
+    dragRectIndex.value = null;
 };
 
 const onToggleOverlay = (val: boolean) => {
@@ -857,19 +878,26 @@ const polygonModeProxy = computed({
             </div>
             <div v-if="store.rectRois.length" class="mv-rect-list">
                 <div
-                    v-for="r in store.rectRois"
+                    v-for="(r, idx) in store.rectRois"
                     :key="r.id"
                     class="mv-rect-item"
+                    :class="{ 'mv-rect-dragging': dragRectIndex === idx }"
+                    draggable="true"
+                    @dragstart="onRectDragStart(idx, $event)"
+                    @dragover="onRectDragOver($event)"
+                    @drop="onRectDrop(idx)"
+                    @dragend="onRectDragEnd"
                 >
+                    <v-icon class="mv-rect-grip" icon="mdi-drag-vertical" size="x-small" />
                     <span class="mv-color-swatch" style="background: #00d4aa" />
-                    <span class="mv-rect-name" :title="rectExtent(r)">{{ r.label ?? ('ROI ' + r.id) }}</span>
+                    <span class="mv-rect-name" :title="rectExtent(r)">{{ store.rectRoiDisplayName(idx) }}</span>
                     <v-btn
                         icon="mdi-pencil"
                         size="x-small"
                         variant="text"
                         density="compact"
                         title="Rename"
-                        @click="onRenameRectRoi(r.id)"
+                        @click="onRenameRectRoi(idx)"
                     />
                     <v-btn
                         icon="mdi-close"
@@ -886,7 +914,7 @@ const polygonModeProxy = computed({
             </div>
             <div v-else class="mv-hint">
                 Select the Rectangle ROI tool, then drag a diagonal on any box (works in 2D view too).<br>
-                <span class="mv-hint-grid">Coordinates are stored as voxel indices; export via Snapshot ▸ Export ROIs.</span>
+                <span class="mv-hint-grid">Coordinates are stored as voxel indices; drag rows to reorder; export via Snapshot ▸ Export ROIs.</span>
             </div>
         </section>
 
@@ -1833,9 +1861,21 @@ const polygonModeProxy = computed({
     padding: 4px 6px;
     border-radius: 4px;
     border: 1px solid transparent;
+    cursor: grab;
 }
 .mv-rect-item:hover {
     background: var(--mv-surface-2);
+}
+.mv-rect-item:active {
+    cursor: grabbing;
+}
+/* ドラッグ中の行: 半透明にして移動中であることを示す */
+.mv-rect-dragging {
+    opacity: 0.5;
+}
+.mv-rect-grip {
+    flex-shrink: 0;
+    color: var(--mv-text-dim);
 }
 .mv-rect-name {
     flex: 1;
